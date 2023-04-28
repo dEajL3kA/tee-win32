@@ -8,7 +8,7 @@ A simple [**`tee`**](https://en.wikipedia.org/wiki/Tee_(command)) implementation
 tee for Windows
 
 Usage:
-  your_program.exe [options] | tee.exe [--append] <output_file>
+  your_program.exe [options] | tee.exe [--append] [--flush] <output_file>
 ```
 
 ## License

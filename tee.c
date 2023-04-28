@@ -19,11 +19,9 @@
 #include <Windows.h>
 #include <ShellAPI.h>
 
-#define BUFFSIZE 4096U
-
 #define HANDLE_WRITE_ERROR(OFFSET) do \
 { \
-    print(hStdErr, "[tee] Error: Not all data could be written!\n\n"); \
+    write_text(hStdErr, L"[tee] Error: Not all data could be written!\n\n"); \
     OFFSET = MAXDWORD; \
 } \
 while (0)
@@ -51,6 +49,8 @@ while (0)
 } \
 while (0)
 
+#define BUFFSIZE 4096U
+
 static volatile BOOL g_stopping = FALSE;
 
 static BOOL WINAPI console_handler(const DWORD ctrlType)
@@ -60,7 +60,6 @@ static BOOL WINAPI console_handler(const DWORD ctrlType)
     case CTRL_C_EVENT:
     case CTRL_BREAK_EVENT:
     case CTRL_CLOSE_EVENT:
-        MessageBoxW(NULL, L"CTRL_C_EVENT", NULL, MB_TOPMOST);
         g_stopping = TRUE;
         return TRUE;
     default:
@@ -68,10 +67,43 @@ static BOOL WINAPI console_handler(const DWORD ctrlType)
     }
 }
 
-static void print(const HANDLE handle, const char* const text)
+static char *utf16_to_utf8(const wchar_t *const input)
 {
+    const int buff_size = WideCharToMultiByte(CP_UTF8, 0, input, -1, NULL, 0, NULL, NULL);
+    if (buff_size > 0)
+    {
+        char *const buffer = (char*)LocalAlloc(LPTR, buff_size);
+        if (buffer)
+        {
+            const int result = WideCharToMultiByte(CP_UTF8, 0, input, -1, buffer, buff_size, NULL, NULL);
+            if ((result > 0) && (result <= buff_size))
+            {
+                return buffer;
+            }
+            LocalFree(buffer);
+        }
+    }
+    return NULL;
+}
+
+static BOOL write_text(const HANDLE handle, const wchar_t *const text)
+{
+    BOOL result = FALSE;
     DWORD written;
-    WriteFile(handle, text, lstrlenA(text), &written, NULL);
+    if (GetConsoleMode(handle, &written))
+    {
+        result = WriteConsoleW(handle, text, lstrlenW(text), &written, NULL);
+    }
+    else
+    {
+        char *const utf8_text = utf16_to_utf8(text);
+        if (utf8_text)
+        {
+            result = WriteFile(handle, utf8_text, lstrlenA(utf8_text), &written, NULL);
+            LocalFree(utf8_text);
+        }
+    }
+    return result;
 }
 
 int wmain(const int argc, const wchar_t *const argv[])
@@ -86,13 +118,13 @@ int wmain(const int argc, const wchar_t *const argv[])
 
     if ((argc < 2) || (lstrcmpiW(argv[1], L"/?") == 0) || (lstrcmpiW(argv[1], L"--help") == 0))
     {
-        print(hStdErr, "tee for Windows [" __DATE__ "]\n\n");
-        print(hStdErr, "Usage:\n");
-        print(hStdErr, "  your_program.exe [options] | tee.exe [--append] <output_file>\n\n");
+        write_text(hStdErr, L"tee for Windows [" TEXT(__DATE__) L"]\n\n");
+        write_text(hStdErr, L"Usage:\n");
+        write_text(hStdErr, L"  your_program.exe [options] | tee.exe [--append] [--flush] <output_file>\n\n");
         return 1;
     }
 
-    BOOL append = FALSE;
+    BOOL append = FALSE, flush = FALSE;
     int argOff = 1;
 
     while (argOff < argc)
@@ -108,28 +140,34 @@ int wmain(const int argc, const wchar_t *const argv[])
             {
                 append = TRUE;
             }
+            else if (lstrcmpiW(option, L"flush") == 0)
+            {
+                flush = TRUE;
+            }
             else
             {
-                print(hStdErr, "[tee] Error: Invalid option encountered!\n\n");
+                write_text(hStdErr, L"[tee] Error: Invalid option \"--");
+                write_text(hStdErr, option);
+                write_text(hStdErr, L"\" encountered!\n\n");
                 return 1;
             }
         }
         else
         {
-            break;
+            break; /*stop option processing*/
         }
     }
 
     if (argOff >= argc)
     {
-        print(hStdErr, "[tee] Error: Output file name is missing!\n\n");
+        write_text(hStdErr, L"[tee] Error: Output file name is missing!\n\n");
         return 1;
     }
 
     const HANDLE hFile = CreateFileW(argv[argOff], GENERIC_WRITE, FILE_SHARE_READ, NULL, append ? OPEN_ALWAYS : CREATE_ALWAYS, 0U, NULL);
     if (hFile == INVALID_HANDLE_VALUE)
     {
-        print(hStdErr, "[tee] Error: Failed to open the output file for writing!\n\n");
+        write_text(hStdErr, L"[tee] Error: Failed to open the output file for writing!\n\n");
         return -1;
     }
 
@@ -138,7 +176,7 @@ int wmain(const int argc, const wchar_t *const argv[])
         LARGE_INTEGER offset = { .QuadPart = 0LL };
         if (!SetFilePointerEx(hFile, offset, NULL, FILE_END))
         {
-            print(hStdErr, "[tee] Error: Failed to move the file pointer to the end of the file!\n\n");
+            write_text(hStdErr, L"[tee] Error: Failed to move the file pointer to the end of the file!\n\n");
             CloseHandle(hFile);
             return -1;
         }
@@ -160,12 +198,18 @@ int wmain(const int argc, const wchar_t *const argv[])
         {
             WRITE_DATA(hStdOut, offsetStdOut);
             WRITE_DATA(hFile, offsetFile);
+            if (flush)
+            {
+                FlushFileBuffers(hFile);
+            }
         }
     }
 
 cleanup:
 
+    FlushFileBuffers(hFile);
     CloseHandle(hFile);
+
     return 0;
 }
 
