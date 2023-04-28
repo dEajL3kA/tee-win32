@@ -28,11 +28,11 @@
 } \
 while (0)
 
-#define WRITE_DATA(HANDLE, OFFSET) do \
+#define WRITE_DATA(DESTINATION, OFFSET) do \
 { \
     if ((OFFSET) < bytesRead) \
     { \
-        if (WriteFile((HANDLE), buffer + (OFFSET), bytesRead - (OFFSET), &bytesWritten, NULL)) \
+        if (WriteFile((DESTINATION), buffer + (OFFSET), bytesRead - (OFFSET), &bytesWritten, NULL)) \
         { \
             if (bytesWritten > 0U) \
             { \
@@ -51,6 +51,23 @@ while (0)
 } \
 while (0)
 
+static volatile BOOL g_stopping = FALSE;
+
+static BOOL WINAPI console_handler(const DWORD ctrlType)
+{
+    switch (ctrlType)
+    {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+        MessageBoxW(NULL, L"CTRL_C_EVENT", NULL, MB_TOPMOST);
+        g_stopping = TRUE;
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
 static void print(const HANDLE handle, const char* const text)
 {
     DWORD written;
@@ -59,6 +76,8 @@ static void print(const HANDLE handle, const char* const text)
 
 int wmain(const int argc, const wchar_t *const argv[])
 {
+    SetConsoleCtrlHandler(console_handler, TRUE);
+
     const HANDLE hStdIn = GetStdHandle(STD_INPUT_HANDLE), hStdOut = GetStdHandle(STD_OUTPUT_HANDLE), hStdErr = GetStdHandle(STD_ERROR_HANDLE);
     if ((hStdIn == INVALID_HANDLE_VALUE) || (hStdOut == INVALID_HANDLE_VALUE) || (hStdErr == INVALID_HANDLE_VALUE))
     {
@@ -128,14 +147,14 @@ int wmain(const int argc, const wchar_t *const argv[])
     static BYTE buffer[BUFFSIZE];
     DWORD bytesRead, bytesWritten, offsetStdOut, offsetFile;
 
-    for (;;)
+    while (!g_stopping)
     {
-        offsetStdOut = offsetFile = 0U;
-
         if (!ReadFile(hStdIn, buffer, BUFFSIZE, &bytesRead, NULL))
         {
             goto cleanup;
         }
+
+        offsetStdOut = offsetFile = 0U;
 
         while ((offsetStdOut < bytesRead) || (offsetFile < bytesRead))
         {
@@ -146,10 +165,8 @@ int wmain(const int argc, const wchar_t *const argv[])
 
 cleanup:
 
-    if (hFile != INVALID_HANDLE_VALUE)
-    {
-        CloseHandle(hFile);
-    }
+    CloseHandle(hFile);
+    return 0;
 }
 
 #pragma warning(disable: 4702)
