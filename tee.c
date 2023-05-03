@@ -32,15 +32,19 @@ static BOOL is_terminal(const HANDLE handle)
     return GetConsoleMode(handle, &mode);
 }
 
+#define APPEND_STRING(X) \
+    do { lstrcpyW(ptr, str##X); ptr += len##X; } while(0)
+
 static wchar_t *concat_3(const wchar_t *const strA, const wchar_t *const strB, const wchar_t *const strC)
 {
     const size_t lenA = lstrlenW(strA), lenB = lstrlenW(strB), lenC = lstrlenW(strC);
     wchar_t *const buffer = (wchar_t*) LocalAlloc(LPTR, sizeof(wchar_t) * (lenA + lenB + lenC + 1U));
     if (buffer)
     {
-        lstrcpyW(buffer, strA);
-        lstrcpyW(buffer + lenA, strB);
-        lstrcpyW(buffer + lenA + lenB, strC);
+        wchar_t *ptr = buffer;
+        APPEND_STRING(A);
+        APPEND_STRING(B);
+        APPEND_STRING(C);
     }
     return buffer;
 }
@@ -72,6 +76,57 @@ static BOOL WINAPI console_handler(const DWORD ctrlType)
     default:
         return FALSE;
     }
+}
+
+// --------------------------------------------------------------------------
+// Version
+// --------------------------------------------------------------------------
+
+static ULONGLONG get_version(void)
+{
+    const HRSRC hVersion = FindResourceW(NULL, MAKEINTRESOURCE(VS_VERSION_INFO), RT_VERSION);
+    if (hVersion)
+    {
+        const HGLOBAL hResource = LoadResource(NULL, hVersion);
+        if (hResource)
+        {
+            const DWORD sizeOfResource = SizeofResource(NULL, hResource);
+            if (sizeOfResource >= sizeof(VS_FIXEDFILEINFO))
+            {
+                const PVOID addrResourceBlock = LockResource(hResource);
+                if (addrResourceBlock)
+                {
+                    VS_FIXEDFILEINFO *fileInfoData;
+                    UINT fileInfoSize;
+                    if (VerQueryValueW(addrResourceBlock, L"\\", &fileInfoData, &fileInfoSize))
+                    {
+                        ULARGE_INTEGER fileVersion;
+                        fileVersion.LowPart  = fileInfoData->dwFileVersionLS;
+                        fileVersion.HighPart = fileInfoData->dwFileVersionMS;
+                        return fileVersion.QuadPart;
+                    }
+                }
+            }
+        }
+    }
+
+    return 0U;
+}
+
+static const wchar_t *get_version_string(void)
+{
+    static wchar_t text[64U] = { '\0' };
+    lstrcpyW(text, L"tee for Windows v#.#.# [" TEXT(__DATE__) L"]\n");
+
+    const ULONGLONG version = get_version();
+    if (version)
+    {
+        text[17U] = L'0' + ((version >> 48) & 0xFFFF);
+        text[19U] = L'0' + ((version >> 32) & 0xFFFF);
+        text[21U] = L'0' + ((version >> 16) & 0xFFFF);
+    }
+
+    return text;
 }
 
 // --------------------------------------------------------------------------
@@ -196,16 +251,24 @@ int wmain(const int argc, const wchar_t *const argv[])
     /* Set up CRTL+C handler */
     SetConsoleCtrlHandler(console_handler, TRUE);
 
+    /* Print version */
+    if ((argc > 1) && (lstrcmpiW(argv[1], L"--version") == 0))
+    {
+        write_text(hStdErr, get_version_string());
+        return 0;
+    }
+
     /* Print manpage */
     if ((argc < 2) || (lstrcmpiW(argv[1], L"/?") == 0) || (lstrcmpiW(argv[1], L"--help") == 0))
     {
-        write_text(hStdErr, L"tee for Windows [" TEXT(__DATE__) L"]\n\n");
-        write_text(hStdErr, L"Usage:\n");
-        write_text(hStdErr, L"  your_program.exe [...] | tee.exe [options] <output_file>\n\n");
-        write_text(hStdErr, L"Options:\n");
-        write_text(hStdErr, L"  --append   Append to the existing file, instead of truncating\n");
-        write_text(hStdErr, L"  --flush    Flush output file after each write operation\n");
-        write_text(hStdErr, L"  --ignore   Ignore the interrupt signal (SIGINT), e.g. CTRL+C\n\n");
+        write_text(hStdErr, get_version_string());
+        write_text(hStdErr, L"\n"
+            L"Usage:\n"
+            L"  your_program.exe [...] | tee.exe [options] <output_file>\n\n"
+            L"Options:\n"
+            L"  --append   Append to the existing file, instead of truncating\n"
+            L"  --flush    Flush output file after each write operation\n"
+            L"  --ignore   Ignore the interrupt signal (SIGINT), e.g. CTRL+C\n\n");
         return 1;
     }
 
