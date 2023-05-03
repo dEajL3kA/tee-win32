@@ -19,8 +19,8 @@
 #include <Windows.h>
 #include <ShellAPI.h>
 
-#define BUFFSIZE 4096U
 #pragma warning(disable: 4706)
+#define BUFFSIZE 8192U
 
  // --------------------------------------------------------------------------
  // Utilities
@@ -32,8 +32,18 @@ static BOOL is_terminal(const HANDLE handle)
     return GetConsoleMode(handle, &mode);
 }
 
-#define APPEND_STRING(X) \
-    do { lstrcpyW(ptr, str##X); ptr += len##X; } while(0)
+#define CHAR_TO_LOWER(C) (((C) != L'\0') ? ((wchar_t)(DWORD_PTR)CharLowerW((LPWSTR)(DWORD_PTR)(C))) : L'\0')
+
+static BOOL is_null_device(const wchar_t *const fileName)
+{
+    if ((CHAR_TO_LOWER(fileName[0U]) == L'n') && (CHAR_TO_LOWER(fileName[1U]) == L'u') || (CHAR_TO_LOWER(fileName[2U]) == L'l'))
+    {
+        return ((fileName[3U] == L'\0') || (fileName[3U] == L'.'));
+    }
+    return FALSE;
+}
+
+#define APPEND_STRING(X) do { lstrcpyW(ptr, str##X); ptr += len##X; } while(0)
 
 static wchar_t *concat_3(const wchar_t *const strA, const wchar_t *const strB, const wchar_t *const strC)
 {
@@ -192,7 +202,7 @@ static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 {
     DWORD bytesWritten;
     const thread_t *const param = (thread_t*) lpThreadParameter;
-
+ 
     for (;;)
     {
         switch (WaitForMultipleObjects(2U, param->hEventReady, FALSE, INFINITE))
@@ -339,38 +349,44 @@ int wmain(const int argc, const wchar_t *const argv[])
     }
 
     /* Open output file */
-    if ((hMyFile = CreateFileW(argv[argOff], GENERIC_WRITE, FILE_SHARE_READ, NULL, append ? OPEN_ALWAYS : CREATE_ALWAYS, 0U, NULL)) == INVALID_HANDLE_VALUE)
+    if (!is_null_device(argv[argOff]))
     {
-        write_text(hStdErr, L"[tee] Error: Failed to open the output file for writing!\n");
-        goto cleanup;
-    }
-
-    /* Seek to the end of the file */
-    if (append)
-    {
-        LARGE_INTEGER offset = { .QuadPart = 0LL };
-        if (!SetFilePointerEx(hMyFile, offset, NULL, FILE_END))
+        if ((hMyFile = CreateFileW(argv[argOff], GENERIC_WRITE, FILE_SHARE_READ, NULL, append ? OPEN_ALWAYS : CREATE_ALWAYS, 0U, NULL)) == INVALID_HANDLE_VALUE)
         {
-            write_text(hStdErr, L"[tee] Error: Failed to move the file pointer to the end of the file!\n");
+            write_text(hStdErr, L"[tee] Error: Failed to open the output file for writing!\n");
             goto cleanup;
+        }
+
+        /* Seek to the end of the file */
+        if (append)
+        {
+            LARGE_INTEGER offset = { .QuadPart = 0LL };
+            if (!SetFilePointerEx(hMyFile, offset, NULL, FILE_END))
+            {
+                write_text(hStdErr, L"[tee] Error: Failed to move the file pointer to the end of the file!\n");
+                goto cleanup;
+            }
         }
     }
 
+    /* Determine thread count */
+    const DWORD threadCount = (hMyFile != INVALID_HANDLE_VALUE) ? 2U : 1U;
+
     /* Set up thread data */
-    for (size_t i = 0; i < 2U; ++i)
+    for (size_t threadId = 0; threadId < threadCount; ++threadId)
     {
-        threadData[i].hOutput = (i > 0U) ? hMyFile : hStdOut;
-        threadData[i].hError = hStdErr;
-        threadData[i].flush = flush && (!is_terminal(threadData[i].hOutput));
-        threadData[i].hEventReady[0U] = hEventThrdReady[i];
-        threadData[i].hEventReady[1U] = hEventStop;
-        threadData[i].hEventCompleted = hEventCompleted[i];
+        threadData[threadId].hOutput = (threadId > 0U) ? hMyFile : hStdOut;
+        threadData[threadId].hError = hStdErr;
+        threadData[threadId].flush = flush && (!is_terminal(threadData[threadId].hOutput));
+        threadData[threadId].hEventReady[0U] = hEventThrdReady[threadId];
+        threadData[threadId].hEventReady[1U] = hEventStop;
+        threadData[threadId].hEventCompleted = hEventCompleted[threadId];
     }
 
     /* Start threads */
-    for (size_t i = 0; i < 2U; ++i)
+    for (DWORD threadId = 0; threadId < threadCount; ++threadId)
     {
-        if (!(hThreads[i] = CreateThread(NULL, 0U, writer_thread_start_routine, &threadData[i], 0U, NULL)))
+        if (!(hThreads[threadId] = CreateThread(NULL, 0U, writer_thread_start_routine, &threadData[threadId], 0U, NULL)))
         {
             write_text(hStdErr, L"[tee] System error: Failed to create thread!\n");
             goto cleanup;
@@ -386,9 +402,9 @@ int wmain(const int argc, const wchar_t *const argv[])
     /* Process all input from STDIN stream */
     do
     {
-        for (size_t i = 0U; i < 2U; ++i)
+        for (DWORD threadId = 0U; threadId < threadCount; ++threadId)
         {
-            if (!SetEvent(hEventThrdReady[i]))
+            if (!SetEvent(hEventThrdReady[threadId]))
             {
                 write_text(hStdErr, L"[tee] System error: Failed to signal event!\n");
                 goto cleanup;
@@ -410,7 +426,7 @@ int wmain(const int argc, const wchar_t *const argv[])
             break;
         }
 
-        const DWORD waitResult = WaitForMultipleObjects(2U, hEventCompleted, TRUE, INFINITE);
+        const DWORD waitResult = WaitForMultipleObjects(threadCount, hEventCompleted, TRUE, INFINITE);
         if ((waitResult != WAIT_OBJECT_0) && (waitResult != WAIT_OBJECT_0 + 1U))
         {
             write_text(hStdErr, L"[tee] System error: Failed to wait for events!\n");
@@ -432,26 +448,27 @@ cleanup:
     }
 
     /* Wait for worker threads to exit */
-    if (hThreads[0U])
+    const DWORD _threadCount = hThreads[0U] ? (hThreads[1U] ? 2U : 1U) : 0U;
+    if (_threadCount)
     {
-        const DWORD waitResult = WaitForMultipleObjects(hThreads[1U] ? 2U : 1U, hThreads, TRUE, 12000U);
+        const DWORD waitResult = WaitForMultipleObjects(_threadCount, hThreads, TRUE, 12000U);
         if ((waitResult != WAIT_OBJECT_0) && (waitResult != WAIT_OBJECT_0 + 1U))
         {
-            for (DWORD i = 0U; i < (hThreads[1U] ? 2U : 1U); ++i)
+            for (DWORD threadId = 0U; threadId < _threadCount; ++threadId)
             {
-                if (WaitForSingleObject(hThreads[i], 125U) != WAIT_OBJECT_0)
+                if (WaitForSingleObject(hThreads[threadId], 1U) != WAIT_OBJECT_0)
                 {
                     write_text(hStdErr, L"[tee] Error: Worker thread did not exit cleanly!\n");
-                    TerminateThread(hThreads[i], 1U);
+                    TerminateThread(hThreads[threadId], 1U);
                 }
             }
         }
     }
 
     /* Close worker threads */
-    for (DWORD i = 0U; i < 2U; ++i)
+    for (DWORD threadId = 0U; threadId < 2U; ++threadId)
     {
-        SAFE_CLOSE_HANDLE(hThreads[i]);
+        SAFE_CLOSE_HANDLE(hThreads[threadId]);
     }
 
     /* Close output file */
@@ -465,10 +482,10 @@ cleanup:
     }
 
     /* Close events */
-    for (size_t i = 0U; i < 2U; ++i)
+    for (DWORD threadId = 0U; threadId < 2U; ++threadId)
     {
-        SAFE_CLOSE_HANDLE(hEventThrdReady[i]);
-        SAFE_CLOSE_HANDLE(hEventCompleted[i]);
+        SAFE_CLOSE_HANDLE(hEventThrdReady[threadId]);
+        SAFE_CLOSE_HANDLE(hEventCompleted[threadId]);
     }
     SAFE_CLOSE_HANDLE(hEventStop);
 
