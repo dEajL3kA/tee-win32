@@ -8,7 +8,12 @@ A simple [**`tee`**](https://en.wikipedia.org/wiki/Tee_(command)) implementation
 tee for Windows
 
 Usage:
-  your_program.exe [options] | tee.exe [--append] [--flush] <output_file>
+  your_program.exe [...] | tee.exe [options] <output_file>
+
+Options:
+  --append   Append to the existing file, instead of truncating
+  --flush    Flush output file after each write operation
+  --ignore   Ignore the interrupt signal (SIGINT), e.g. CTRL+C
 ```
 
 ## License

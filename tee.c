@@ -19,39 +19,46 @@
 #include <Windows.h>
 #include <ShellAPI.h>
 
-#define HANDLE_WRITE_ERROR(OFFSET) do \
-{ \
-    write_text(hStdErr, L"[tee] Error: Not all data could be written!\n\n"); \
-    OFFSET = MAXDWORD; \
-} \
-while (0)
+#define BUFFSIZE 4096U
+#pragma warning(disable: 4706)
 
-#define WRITE_DATA(DESTINATION, OFFSET) do \
+ // --------------------------------------------------------------------------
+ // Utilities
+ // --------------------------------------------------------------------------
+
+static BOOL is_terminal(const HANDLE handle)
+{
+    DWORD mode;
+    return GetConsoleMode(handle, &mode);
+}
+
+static wchar_t *concat_3(const wchar_t *const strA, const wchar_t *const strB, const wchar_t *const strC)
+{
+    const size_t lenA = lstrlenW(strA), lenB = lstrlenW(strB), lenC = lstrlenW(strC);
+    wchar_t *const buffer = (wchar_t*) LocalAlloc(LPTR, sizeof(wchar_t) * (lenA + lenB + lenC + 1U));
+    if (buffer)
+    {
+        lstrcpyW(buffer, strA);
+        lstrcpyW(buffer + lenA, strB);
+        lstrcpyW(buffer + lenA + lenB, strC);
+    }
+    return buffer;
+}
+
+#define SAFE_CLOSE_HANDLE(HANDLE) do \
 { \
-    if ((OFFSET) < bytesRead) \
+    if (HANDLE) \
     { \
-        if (WriteFile((DESTINATION), buffer + (OFFSET), bytesRead - (OFFSET), &bytesWritten, NULL)) \
-        { \
-            if (bytesWritten > 0U) \
-            { \
-                OFFSET += bytesWritten; \
-            } \
-            else \
-            { \
-                HANDLE_WRITE_ERROR(OFFSET); \
-            } \
-        } \
-        else \
-        { \
-            HANDLE_WRITE_ERROR(OFFSET); \
-        } \
+        CloseHandle((HANDLE)); \
     } \
 } \
 while (0)
 
-#define BUFFSIZE 4096U
+// --------------------------------------------------------------------------
+// Console CTRL+C handler
+// --------------------------------------------------------------------------
 
-static volatile BOOL g_stopping = FALSE;
+static volatile BOOL g_stop = FALSE;
 
 static BOOL WINAPI console_handler(const DWORD ctrlType)
 {
@@ -60,12 +67,16 @@ static BOOL WINAPI console_handler(const DWORD ctrlType)
     case CTRL_C_EVENT:
     case CTRL_BREAK_EVENT:
     case CTRL_CLOSE_EVENT:
-        g_stopping = TRUE;
+        g_stop = TRUE;
         return TRUE;
     default:
         return FALSE;
     }
 }
+
+// --------------------------------------------------------------------------
+// Text output
+// --------------------------------------------------------------------------
 
 static char *utf16_to_utf8(const wchar_t *const input)
 {
@@ -106,27 +117,99 @@ static BOOL write_text(const HANDLE handle, const wchar_t *const text)
     return result;
 }
 
+// --------------------------------------------------------------------------
+// Writer thread
+// --------------------------------------------------------------------------
+
+static BYTE buffer[2U][BUFFSIZE];
+static DWORD bytesTotal[2U] = { 0U, 0U };
+static volatile ULONG_PTR index = 0U;
+
+typedef struct
+{
+    HANDLE hOutput,hError;
+    BOOL flush;
+    HANDLE hEventReady[2U], hEventCompleted;
+}
+thread_t;
+
+static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
+{
+    DWORD bytesWritten;
+    const thread_t *const param = (thread_t*) lpThreadParameter;
+
+    for (;;)
+    {
+        switch (WaitForMultipleObjects(2U, param->hEventReady, FALSE, INFINITE))
+        {
+        case WAIT_OBJECT_0:
+            break;
+        case WAIT_OBJECT_0 + 1U:
+            SetEvent(param->hEventCompleted);
+            return 0U;
+        default:
+            write_text(param->hError, L"[tee] System error: Failed to wait for event!\n");
+            return 1U;
+        }
+
+        const ULONG_PTR myIndex = index;
+
+        for (DWORD offset = 0U; offset < bytesTotal[myIndex]; offset += bytesWritten)
+        {
+            const BOOL result = WriteFile(param->hOutput, buffer[myIndex] + offset, bytesTotal[myIndex] - offset, &bytesWritten, NULL);
+            if ((!result) || (!bytesWritten))
+            {
+                write_text(param->hError, L"[tee] Error: Not all data could be written!\n");
+                break;
+            }
+        }
+
+        SetEvent(param->hEventCompleted);
+
+        if (param->flush)
+        {
+            FlushFileBuffers(param->hOutput);
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
+// MAIN
+// --------------------------------------------------------------------------
+
 int wmain(const int argc, const wchar_t *const argv[])
 {
-    SetConsoleCtrlHandler(console_handler, TRUE);
+    HANDLE hThreads[2U] = { NULL, NULL };
+    HANDLE hEventStop = NULL, hEventThrdReady[2U] = { NULL, NULL }, hEventCompleted[2U] = { NULL, NULL };
+    HANDLE hMyFile = INVALID_HANDLE_VALUE;
+    int exitCode = 1, argOff = 1;
+    BOOL append = FALSE, flush = FALSE, ignore = FALSE;
+    thread_t threadData[2U];
 
+    /* Initialize standard streams */
     const HANDLE hStdIn = GetStdHandle(STD_INPUT_HANDLE), hStdOut = GetStdHandle(STD_OUTPUT_HANDLE), hStdErr = GetStdHandle(STD_ERROR_HANDLE);
     if ((hStdIn == INVALID_HANDLE_VALUE) || (hStdOut == INVALID_HANDLE_VALUE) || (hStdErr == INVALID_HANDLE_VALUE))
     {
         FatalExit(-1);
     }
 
+    /* Set up CRTL+C handler */
+    SetConsoleCtrlHandler(console_handler, TRUE);
+
+    /* Print manpage */
     if ((argc < 2) || (lstrcmpiW(argv[1], L"/?") == 0) || (lstrcmpiW(argv[1], L"--help") == 0))
     {
         write_text(hStdErr, L"tee for Windows [" TEXT(__DATE__) L"]\n\n");
         write_text(hStdErr, L"Usage:\n");
-        write_text(hStdErr, L"  your_program.exe [options] | tee.exe [--append] [--flush] <output_file>\n\n");
+        write_text(hStdErr, L"  your_program.exe [...] | tee.exe [options] <output_file>\n\n");
+        write_text(hStdErr, L"Options:\n");
+        write_text(hStdErr, L"  --append   Append to the existing file, instead of truncating\n");
+        write_text(hStdErr, L"  --flush    Flush output file after each write operation\n");
+        write_text(hStdErr, L"  --ignore   Ignore the interrupt signal (SIGINT), e.g. CTRL+C\n\n");
         return 1;
     }
 
-    BOOL append = FALSE, flush = FALSE;
-    int argOff = 1;
-
+    /* Parse command-line options */
     while (argOff < argc)
     {
         if ((argv[argOff][0U] == L'-') && (argv[argOff][1U] == L'-'))
@@ -144,74 +227,195 @@ int wmain(const int argc, const wchar_t *const argv[])
             {
                 flush = TRUE;
             }
+            else if (lstrcmpiW(option, L"ignore") == 0)
+            {
+                ignore = TRUE;
+            }
             else
             {
-                write_text(hStdErr, L"[tee] Error: Invalid option \"--");
-                write_text(hStdErr, option);
-                write_text(hStdErr, L"\" encountered!\n\n");
+                wchar_t *const message = concat_3(L"[tee] Error: Invalid option \"--", option, L"\" encountered!\n");
+                if (message)
+                {
+                    write_text(hStdErr, message);
+                    LocalFree(message);
+                }
                 return 1;
             }
         }
         else
         {
-            break; /*stop option processing*/
+            break; /* stop option processing */
         }
     }
 
+    /* Check output file name */
     if (argOff >= argc)
     {
-        write_text(hStdErr, L"[tee] Error: Output file name is missing!\n\n");
+        write_text(hStdErr, L"[tee] Error: Output file name is missing!\n");
         return 1;
     }
 
-    const HANDLE hFile = CreateFileW(argv[argOff], GENERIC_WRITE, FILE_SHARE_READ, NULL, append ? OPEN_ALWAYS : CREATE_ALWAYS, 0U, NULL);
-    if (hFile == INVALID_HANDLE_VALUE)
+    /* Create events */
+    if (!(hEventStop = CreateEventW(NULL, TRUE, FALSE, NULL)))
     {
-        write_text(hStdErr, L"[tee] Error: Failed to open the output file for writing!\n\n");
-        return -1;
+        write_text(hStdErr, L"[tee] System error: Failed to create event!\n\n");
+        goto cleanup;
+    }
+    for (size_t i = 0U; i < 2U; ++i)
+    {
+        if (!(hEventThrdReady[i] = CreateEventW(NULL, FALSE, FALSE, NULL)))
+        {
+            write_text(hStdErr, L"[tee] System error: Failed to create event!\n\n");
+            goto cleanup;
+        }
+        if (!(hEventCompleted[i] = CreateEventW(NULL, FALSE, FALSE, NULL)))
+        {
+            write_text(hStdErr, L"[tee] System error: Failed to create event!\n\n");
+            goto cleanup;
+        }
     }
 
+    /* Open output file */
+    if ((hMyFile = CreateFileW(argv[argOff], GENERIC_WRITE, FILE_SHARE_READ, NULL, append ? OPEN_ALWAYS : CREATE_ALWAYS, 0U, NULL)) == INVALID_HANDLE_VALUE)
+    {
+        write_text(hStdErr, L"[tee] Error: Failed to open the output file for writing!\n");
+        goto cleanup;
+    }
+
+    /* Seek to the end of the file */
     if (append)
     {
         LARGE_INTEGER offset = { .QuadPart = 0LL };
-        if (!SetFilePointerEx(hFile, offset, NULL, FILE_END))
+        if (!SetFilePointerEx(hMyFile, offset, NULL, FILE_END))
         {
-            write_text(hStdErr, L"[tee] Error: Failed to move the file pointer to the end of the file!\n\n");
-            CloseHandle(hFile);
-            return -1;
+            write_text(hStdErr, L"[tee] Error: Failed to move the file pointer to the end of the file!\n");
+            goto cleanup;
         }
     }
 
-    static BYTE buffer[BUFFSIZE];
-    DWORD bytesRead, bytesWritten, offsetStdOut, offsetFile;
-
-    while (!g_stopping)
+    /* Set up thread data */
+    for (size_t i = 0; i < 2U; ++i)
     {
-        if (!ReadFile(hStdIn, buffer, BUFFSIZE, &bytesRead, NULL))
+        threadData[i].hOutput = (i > 0U) ? hMyFile : hStdOut;
+        threadData[i].hError = hStdErr;
+        threadData[i].flush = flush && (!is_terminal(threadData[i].hOutput));
+        threadData[i].hEventReady[0U] = hEventThrdReady[i];
+        threadData[i].hEventReady[1U] = hEventStop;
+        threadData[i].hEventCompleted = hEventCompleted[i];
+    }
+
+    /* Start threads */
+    for (size_t i = 0; i < 2U; ++i)
+    {
+        if (!(hThreads[i] = CreateThread(NULL, 0U, writer_thread_start_routine, &threadData[i], 0U, NULL)))
         {
+            write_text(hStdErr, L"[tee] System error: Failed to create thread!\n");
+            goto cleanup;
+        }
+    }
+
+    /* Are we reading from a pipe? */
+    const BOOL isPipeInput = (GetFileType(hStdIn) == FILE_TYPE_PIPE);
+
+    /* Initialize index */
+    ULONG_PTR myIndex = 1U - index;
+
+    /* Process all input from STDIN stream */
+    do
+    {
+        for (size_t i = 0U; i < 2U; ++i)
+        {
+            if (!SetEvent(hEventThrdReady[i]))
+            {
+                write_text(hStdErr, L"[tee] System error: Failed to signal event!\n");
+                goto cleanup;
+            }
+        }
+
+        if (!ReadFile(hStdIn, buffer[myIndex], BUFFSIZE, &bytesTotal[myIndex], NULL))
+        {
+            if (GetLastError() != ERROR_BROKEN_PIPE)
+            {
+                write_text(hStdErr, L"[tee] Error: Failed to read input data!\n");
+                goto cleanup;
+            }
+            break;
+        }
+
+        if ((!bytesTotal[myIndex]) && (!isPipeInput)) /*pipes may return zero bytes, even when more data can become available later!*/
+        {
+            break;
+        }
+
+        const DWORD waitResult = WaitForMultipleObjects(2U, hEventCompleted, TRUE, INFINITE);
+        if ((waitResult != WAIT_OBJECT_0) && (waitResult != WAIT_OBJECT_0 + 1U))
+        {
+            write_text(hStdErr, L"[tee] System error: Failed to wait for events!\n");
             goto cleanup;
         }
 
-        offsetStdOut = offsetFile = 0U;
+        myIndex = (ULONG_PTR) InterlockedExchangePointer((PVOID*)&index, (PVOID)myIndex);
+    }
+    while ((!g_stop) || ignore);
 
-        while ((offsetStdOut < bytesRead) || (offsetFile < bytesRead))
+    exitCode = 0;
+
+cleanup:
+
+    /* Stop the worker threads */
+    if (hEventStop)
+    {
+        SetEvent(hEventStop);
+    }
+
+    /* Wait for worker threads to exit */
+    if (hThreads[0U])
+    {
+        const DWORD waitResult = WaitForMultipleObjects(hThreads[1U] ? 2U : 1U, hThreads, TRUE, 12000U);
+        if ((waitResult != WAIT_OBJECT_0) && (waitResult != WAIT_OBJECT_0 + 1U))
         {
-            WRITE_DATA(hStdOut, offsetStdOut);
-            WRITE_DATA(hFile, offsetFile);
-            if (flush)
+            for (DWORD i = 0U; i < (hThreads[1U] ? 2U : 1U); ++i)
             {
-                FlushFileBuffers(hFile);
+                if (WaitForSingleObject(hThreads[i], 125U) != WAIT_OBJECT_0)
+                {
+                    write_text(hStdErr, L"[tee] Error: Worker thread did not exit cleanly!\n");
+                    TerminateThread(hThreads[i], 1U);
+                }
             }
         }
     }
 
-cleanup:
+    /* Close worker threads */
+    for (DWORD i = 0U; i < 2U; ++i)
+    {
+        SAFE_CLOSE_HANDLE(hThreads[i]);
+    }
 
-    FlushFileBuffers(hFile);
-    CloseHandle(hFile);
+    /* Close output file */
+    if (hMyFile != INVALID_HANDLE_VALUE)
+    {
+        if (flush)
+        {
+            FlushFileBuffers(hMyFile);
+        }
+        CloseHandle(hMyFile);
+    }
 
-    return 0;
+    /* Close events */
+    for (size_t i = 0U; i < 2U; ++i)
+    {
+        SAFE_CLOSE_HANDLE(hEventThrdReady[i]);
+        SAFE_CLOSE_HANDLE(hEventCompleted[i]);
+    }
+    SAFE_CLOSE_HANDLE(hEventStop);
+
+    /* Exit */
+    return exitCode;
 }
+
+// --------------------------------------------------------------------------
+// CRT Startup
+// --------------------------------------------------------------------------
 
 #pragma warning(disable: 4702)
 
