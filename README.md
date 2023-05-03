@@ -16,6 +16,12 @@ Options:
   --ignore   Ignore the interrupt signal (SIGINT), e.g. CTRL+C
 ```
 
+## Implementation
+
+This is a "native" implementation of `tee` that builds directly on top of the Win32 API.
+
+It uses multi-threaded processing and double buffering for maximum throughput.
+
 ## License
 
 Copyright (c) 2023 "dEajL3kA" &lt;Cumpoing79@web.de&gt;  
