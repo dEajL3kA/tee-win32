@@ -253,6 +253,77 @@ static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 }
 
 // --------------------------------------------------------------------------
+// Options
+// --------------------------------------------------------------------------
+
+typedef struct
+{
+    BOOL append, flush, ignore, help, version;
+}
+options_t;
+
+static BOOL parse_option(options_t *const options, wchar_t c, const wchar_t *const name)
+{
+    c = CHAR_TO_LOWER(c);
+
+    if ((c == L'a') || (name && (lstrcmpiW(name, L"append") == 0)))
+    {
+        options->append = TRUE;
+        return TRUE;
+    }
+
+    if ((c == L'f') || (name && (lstrcmpiW(name, L"flush") == 0)))
+    {
+        options->flush = TRUE;
+        return TRUE;
+    }
+
+    if ((c == L'i') || (name && (lstrcmpiW(name, L"ignore") == 0)))
+    {
+        options->ignore = TRUE;
+        return TRUE;
+    }
+
+    if ((c == L'h') || (name && (lstrcmpiW(name, L"help") == 0)))
+    {
+        options->help = TRUE;
+        return TRUE;
+    }
+
+    if ((c == L'v') || (name && (lstrcmpiW(name, L"version") == 0)))
+    {
+        options->version = TRUE;
+        return TRUE;
+    }
+
+    return FALSE; /*unknown option*/
+}
+
+static BOOL parse_argument(options_t *const options, const wchar_t *const argument)
+{
+    if (argument[0U] != L'-')
+    {
+        return FALSE;
+    }
+
+    if (argument[1U] == L'-')
+    {
+        return parse_option(options, L'\0', argument + 2U);
+    }
+    else
+    {
+        for (const wchar_t* ptr = argument + 1U; *ptr != L'\0'; ++ptr)
+        {
+            if (!parse_option(options, *ptr, NULL))
+            {
+                return FALSE;
+            }
+        }
+        return TRUE;
+    }
+}
+
+// --------------------------------------------------------------------------
 // MAIN
 // --------------------------------------------------------------------------
 
@@ -262,97 +333,82 @@ int wmain(const int argc, const wchar_t *const argv[])
     HANDLE hEventStop = NULL, hEventThrdReady[2U] = { NULL, NULL }, hEventCompleted[2U] = { NULL, NULL };
     HANDLE hMyFile = INVALID_HANDLE_VALUE;
     int exitCode = 1, argOff = 1;
-    BOOL append = FALSE, flush = FALSE, ignore = FALSE;
+    options_t options;
     thread_t threadData[2U];
+
+    /* Clear options */
+    SecureZeroMemory(&options, sizeof(options_t));
 
     /* Initialize standard streams */
     const HANDLE hStdIn = GetStdHandle(STD_INPUT_HANDLE), hStdOut = GetStdHandle(STD_OUTPUT_HANDLE), hStdErr = GetStdHandle(STD_ERROR_HANDLE);
     if ((hStdIn == INVALID_HANDLE_VALUE) || (hStdOut == INVALID_HANDLE_VALUE) || (hStdErr == INVALID_HANDLE_VALUE))
     {
-        FatalExit(-1);
+        return -1;
     }
 
     /* Set up CRTL+C handler */
     SetConsoleCtrlHandler(console_handler, TRUE);
 
-    /* Print version */
-    if ((argc > 1) && (lstrcmpiW(argv[1], L"--version") == 0))
+    /* Parse command-line options */
+    while ((argOff < argc) && (argv[argOff][0U] == L'-') && (argv[argOff][1U] != L'\0'))
+    {
+        const wchar_t *const argValue= argv[argOff++];
+        if ((argValue[1U] == L'-') && (argValue[2U] == L'\0'))
+        {
+            break; /*stop!*/
+        }
+        else if (!parse_argument(&options, argValue))
+        {
+            wchar_t* const message = concat_3(L"[tee] Error: Invalid option \"", argValue, L"\" encountered!\n");
+            if (message)
+            {
+                write_text(hStdErr, message);
+                LocalFree(message);
+            }
+            return 1;
+        }
+    }
+
+    /* Print version information */
+    if (options.version)
     {
         write_text(hStdErr, get_version_string());
         return 0;
     }
 
-    /* Print manpage */
-    if ((argc < 2) || (lstrcmpiW(argv[1], L"/?") == 0) || (lstrcmpiW(argv[1], L"--help") == 0))
+    /* Print manual page */
+    if (options.help)
     {
         write_text(hStdErr, get_version_string());
         write_text(hStdErr, L"\n"
+            L"Copy standard input to output file, and also to standard output.\n\n"
             L"Usage:\n"
-            L"  your_program.exe [...] | tee.exe [options] <output_file>\n\n"
+            L"  gizmo.exe [...] | tee.exe [options] <output_file>\n\n"
             L"Options:\n"
-            L"  --append   Append to the existing file, instead of truncating\n"
-            L"  --flush    Flush output file after each write operation\n"
-            L"  --ignore   Ignore the interrupt signal (SIGINT), e.g. CTRL+C\n\n");
-        return 1;
-    }
-
-    /* Parse command-line options */
-    while (argOff < argc)
-    {
-        if ((argv[argOff][0U] == L'-') && (argv[argOff][1U] == L'-'))
-        {
-            const wchar_t *const option = argv[argOff++] + 2U;
-            if (*option == L'\0')
-            {
-                break;
-            }
-            else if (lstrcmpiW(option, L"append") == 0)
-            {
-                append = TRUE;
-            }
-            else if (lstrcmpiW(option, L"flush") == 0)
-            {
-                flush = TRUE;
-            }
-            else if (lstrcmpiW(option, L"ignore") == 0)
-            {
-                ignore = TRUE;
-            }
-            else
-            {
-                wchar_t *const message = concat_3(L"[tee] Error: Invalid option \"--", option, L"\" encountered!\n");
-                if (message)
-                {
-                    write_text(hStdErr, message);
-                    LocalFree(message);
-                }
-                return 1;
-            }
-        }
-        else
-        {
-            break; /* stop option processing */
-        }
+            L"  -a --append  Append to the existing file, instead of truncating\n"
+            L"  -f --flush   Flush output file after each write operation\n"
+            L"  -i --ignore  Ignore the interrupt signal (SIGINT), e.g. CTRL+C\n\n");
+        return 0;
     }
 
     /* Check output file name */
     if (argOff >= argc)
     {
-        write_text(hStdErr, L"[tee] Error: Output file name is missing!\n");
+        write_text(hStdErr, L"[tee] Error: Output file name is missing. Type \"tee --help\" for details!\n");
         return 1;
     }
 
     /* Open output file */
     if (!is_null_device(argv[argOff]))
     {
-        if ((hMyFile = CreateFileW(argv[argOff], GENERIC_WRITE, FILE_SHARE_READ, NULL, append ? OPEN_ALWAYS : CREATE_ALWAYS, 0U, NULL)) == INVALID_HANDLE_VALUE)
+        if ((hMyFile = CreateFileW(argv[argOff], GENERIC_WRITE, FILE_SHARE_READ, NULL, options.append ? OPEN_ALWAYS : CREATE_ALWAYS, 0U, NULL)) == INVALID_HANDLE_VALUE)
         {
             write_text(hStdErr, L"[tee] Error: Failed to open the output file for writing!\n");
             goto cleanup;
         }
 
         /* Seek to the end of the file */
-        if (append)
+        if (options.append)
         {
             LARGE_INTEGER offset = { .QuadPart = 0LL };
             if (!SetFilePointerEx(hMyFile, offset, NULL, FILE_END))
@@ -391,7 +447,7 @@ int wmain(const int argc, const wchar_t *const argv[])
     {
         threadData[threadId].hOutput = (threadId > 0U) ? hMyFile : hStdOut;
         threadData[threadId].hError = hStdErr;
-        threadData[threadId].flush = flush && (!is_terminal(threadData[threadId].hOutput));
+        threadData[threadId].flush = options.flush && (!is_terminal(threadData[threadId].hOutput));
         threadData[threadId].hEventReady[0U] = hEventThrdReady[threadId];
         threadData[threadId].hEventReady[1U] = hEventStop;
         threadData[threadId].hEventCompleted = hEventCompleted[threadId];
@@ -449,7 +505,7 @@ int wmain(const int argc, const wchar_t *const argv[])
 
         myIndex = (ULONG_PTR) InterlockedExchangePointer((PVOID*)&index, (PVOID)myIndex);
     }
-    while ((!g_stop) || ignore);
+    while ((!g_stop) || options.ignore);
 
     exitCode = 0;
 
@@ -480,7 +536,7 @@ cleanup:
     }
 
     /* Flush the output file */
-    if ((hMyFile != INVALID_HANDLE_VALUE) && flush)
+    if ((hMyFile != INVALID_HANDLE_VALUE) && options.flush)
     {
         FlushFileBuffers(hMyFile);
     }
@@ -520,7 +576,7 @@ int wmainCRTStartup(void)
     LPWSTR *const szArglist = CommandLineToArgvW(GetCommandLineW(), &nArgs);
     if (!szArglist)
     {
-        FatalExit(-1);
+        ExitProcess((UINT)-1);
     }
 
     const int retval = wmain(nArgs, szArglist);

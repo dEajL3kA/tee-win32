@@ -7,18 +7,20 @@ A simple [**`tee`**](https://en.wikipedia.org/wiki/Tee_(command)) implementation
 ```
 tee for Windows
 
+Copy standard input to output file, and also to standard output.
+
 Usage:
-  your_program.exe [...] | tee.exe [options] <output_file>
+  gizmo.exe [...] | tee.exe [options] <output_file>
 
 Options:
-  --append   Append to the existing file, instead of truncating
-  --flush    Flush output file after each write operation
-  --ignore   Ignore the interrupt signal (SIGINT), e.g. CTRL+C
+  -a --append  Append to the existing file, instead of truncating
+  -f --flush   Flush output file after each write operation
+  -i --ignore  Ignore the interrupt signal (SIGINT), e.g. CTRL+C
 ```
 
 ## Implementation
 
-This is a "native" implementation of `tee` that builds directly on top of the Win32 API.
+This is a "native" implementation of the **`tee`** command that builds directly on top of the Win32 API.
 
 It uses multi-threaded processing and double buffering for maximum throughput.
 
