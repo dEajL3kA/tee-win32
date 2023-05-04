@@ -26,24 +26,37 @@
  // Utilities
  // --------------------------------------------------------------------------
 
+#define APPEND_STRING(X) do { lstrcpyW(ptr, str##X); ptr += len##X; } while(0)
+
+#define CHAR_TO_LOWER(C) (((C) != L'\0') ? ((wchar_t)(DWORD_PTR)CharLowerW((LPWSTR)(DWORD_PTR)(C))) : L'\0')
+
 static BOOL is_terminal(const HANDLE handle)
 {
     DWORD mode;
     return GetConsoleMode(handle, &mode);
 }
 
-#define CHAR_TO_LOWER(C) (((C) != L'\0') ? ((wchar_t)(DWORD_PTR)CharLowerW((LPWSTR)(DWORD_PTR)(C))) : L'\0')
-
-static BOOL is_null_device(const wchar_t *const fileName)
+static const wchar_t *get_filename(const wchar_t *filePath)
 {
-    if ((CHAR_TO_LOWER(fileName[0U]) == L'n') && (CHAR_TO_LOWER(fileName[1U]) == L'u') || (CHAR_TO_LOWER(fileName[2U]) == L'l'))
+    for (const wchar_t *ptr = filePath; *ptr != L'\0'; ++ptr)
     {
-        return ((fileName[3U] == L'\0') || (fileName[3U] == L'.'));
+        if ((*ptr == L'\\') || (*ptr == L'/'))
+        {
+            filePath = ptr + 1U;
+        }
+    }
+    return filePath;
+}
+
+static BOOL is_null_device(const wchar_t *filePath)
+{
+    filePath = get_filename(filePath);
+    if ((CHAR_TO_LOWER(filePath[0U]) == L'n') && (CHAR_TO_LOWER(filePath[1U]) == L'u') || (CHAR_TO_LOWER(filePath[2U]) == L'l'))
+    {
+        return ((filePath[3U] == L'\0') || (filePath[3U] == L'.'));
     }
     return FALSE;
 }
-
-#define APPEND_STRING(X) do { lstrcpyW(ptr, str##X); ptr += len##X; } while(0)
 
 static wchar_t *concat_3(const wchar_t *const strA, const wchar_t *const strB, const wchar_t *const strC)
 {
@@ -59,11 +72,12 @@ static wchar_t *concat_3(const wchar_t *const strA, const wchar_t *const strB, c
     return buffer;
 }
 
-#define SAFE_CLOSE_HANDLE(HANDLE) do \
+#define CLOSE_HANDLE(HANDLE) do \
 { \
-    if (HANDLE) \
+    if (((HANDLE) != NULL) && ((HANDLE) != INVALID_HANDLE_VALUE)) \
     { \
         CloseHandle((HANDLE)); \
+        (HANDLE) = NULL; \
     } \
 } \
 while (0)
@@ -328,26 +342,6 @@ int wmain(const int argc, const wchar_t *const argv[])
         return 1;
     }
 
-    /* Create events */
-    if (!(hEventStop = CreateEventW(NULL, TRUE, FALSE, NULL)))
-    {
-        write_text(hStdErr, L"[tee] System error: Failed to create event!\n\n");
-        goto cleanup;
-    }
-    for (size_t i = 0U; i < 2U; ++i)
-    {
-        if (!(hEventThrdReady[i] = CreateEventW(NULL, FALSE, FALSE, NULL)))
-        {
-            write_text(hStdErr, L"[tee] System error: Failed to create event!\n\n");
-            goto cleanup;
-        }
-        if (!(hEventCompleted[i] = CreateEventW(NULL, FALSE, FALSE, NULL)))
-        {
-            write_text(hStdErr, L"[tee] System error: Failed to create event!\n\n");
-            goto cleanup;
-        }
-    }
-
     /* Open output file */
     if (!is_null_device(argv[argOff]))
     {
@@ -371,6 +365,26 @@ int wmain(const int argc, const wchar_t *const argv[])
 
     /* Determine thread count */
     const DWORD threadCount = (hMyFile != INVALID_HANDLE_VALUE) ? 2U : 1U;
+
+    /* Create events */
+    if (!(hEventStop = CreateEventW(NULL, TRUE, FALSE, NULL)))
+    {
+        write_text(hStdErr, L"[tee] System error: Failed to create event object!\n\n");
+        goto cleanup;
+    }
+    for (size_t threadId = 0U; threadId < threadCount; ++threadId)
+    {
+        if (!(hEventThrdReady[threadId] = CreateEventW(NULL, FALSE, FALSE, NULL)))
+        {
+            write_text(hStdErr, L"[tee] System error: Failed to create event object!\n\n");
+            goto cleanup;
+        }
+        if (!(hEventCompleted[threadId] = CreateEventW(NULL, FALSE, FALSE, NULL)))
+        {
+            write_text(hStdErr, L"[tee] System error: Failed to create event object!\n\n");
+            goto cleanup;
+        }
+    }
 
     /* Set up thread data */
     for (size_t threadId = 0; threadId < threadCount; ++threadId)
@@ -465,29 +479,28 @@ cleanup:
         }
     }
 
+    /* Flush the output file */
+    if ((hMyFile != INVALID_HANDLE_VALUE) && flush)
+    {
+        FlushFileBuffers(hMyFile);
+    }
+
     /* Close worker threads */
     for (DWORD threadId = 0U; threadId < 2U; ++threadId)
     {
-        SAFE_CLOSE_HANDLE(hThreads[threadId]);
+        CLOSE_HANDLE(hThreads[threadId]);
     }
 
-    /* Close output file */
-    if (hMyFile != INVALID_HANDLE_VALUE)
-    {
-        if (flush)
-        {
-            FlushFileBuffers(hMyFile);
-        }
-        CloseHandle(hMyFile);
-    }
+    /* Close the output file */
+    CLOSE_HANDLE(hMyFile);
 
     /* Close events */
     for (DWORD threadId = 0U; threadId < 2U; ++threadId)
     {
-        SAFE_CLOSE_HANDLE(hEventThrdReady[threadId]);
-        SAFE_CLOSE_HANDLE(hEventCompleted[threadId]);
+        CLOSE_HANDLE(hEventThrdReady[threadId]);
+        CLOSE_HANDLE(hEventCompleted[threadId]);
     }
-    SAFE_CLOSE_HANDLE(hEventStop);
+    CLOSE_HANDLE(hEventStop);
 
     /* Exit */
     return exitCode;
