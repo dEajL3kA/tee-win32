@@ -7,10 +7,10 @@ A simple [**`tee`**](https://en.wikipedia.org/wiki/Tee_(command)) implementation
 ```
 tee for Windows
 
-Copy standard input to output file, and also to standard output.
+Copy standard input to output file(s), and also to standard output.
 
 Usage:
-  gizmo.exe [...] | tee.exe [options] <output_file>
+  gizmo.exe [...] | tee.exe [options] <file_1> ... <file_n>
 
 Options:
   -a --append  Append to the existing file, instead of truncating

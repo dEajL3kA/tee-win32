@@ -20,8 +20,8 @@
 #include <ShellAPI.h>
 #include <stdarg.h>
 
-#pragma warning(disable: 4706)
 #define BUFFSIZE 8192U
+#define MAX_THREADS (MAXIMUM_WAIT_OBJECTS >> 1)
 
  // --------------------------------------------------------------------------
  // Utilities
@@ -36,6 +36,20 @@ static BOOL is_terminal(const HANDLE handle)
 {
     DWORD mode;
     return GetConsoleMode(handle, &mode);
+}
+
+static DWORD count_handles(const HANDLE *const array, const size_t maximum)
+{
+    DWORD counter;
+    for (counter = 0U; counter < maximum; ++counter)
+    {
+        if (!array[counter])
+        {
+            break;
+        }
+    }
+
+    return counter;
 }
 
 static const wchar_t *get_filename(const wchar_t *filePath)
@@ -98,6 +112,8 @@ static wchar_t *concat_va(const wchar_t *const first, ...)
 while (0)
 
 #define CONCAT(...) concat_va(__VA_ARGS__, NULL)
+
+#define WAIT_SUCCESS(RESULT, COUNT) (((RESULT) >= WAIT_OBJECT_0) && ((RESULT) < WAIT_OBJECT_0 + (COUNT)))
 
 // --------------------------------------------------------------------------
 // Console CTRL+C handler
@@ -228,22 +244,23 @@ while (0)
 // Writer thread
 // --------------------------------------------------------------------------
 
-static BYTE buffer[2U][BUFFSIZE];
-static DWORD bytesTotal[2U] = { 0U, 0U };
-static volatile ULONG_PTR index = 0U;
-
 typedef struct
 {
-    HANDLE hOutput,hError;
+    HANDLE hOutput, hError;
     BOOL flush;
     HANDLE hEventReady[2U], hEventCompleted;
 }
 thread_t;
 
+static thread_t threadData[MAX_THREADS];
+static BYTE buffer[2U][BUFFSIZE];
+static DWORD bytesTotal[2U] = { 0U, 0U };
+static volatile ULONG_PTR index = 0U;
+
 static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 {
     DWORD bytesWritten;
-    const thread_t *const param = (thread_t*) lpThreadParameter;
+    const thread_t *const param = &threadData[(DWORD_PTR)lpThreadParameter];
  
     for (;;)
     {
@@ -343,15 +360,20 @@ static BOOL parse_argument(options_t *const options, const wchar_t *const argume
 
 int wmain(const int argc, const wchar_t *const argv[])
 {
-    HANDLE hThreads[2U] = { NULL, NULL };
-    HANDLE hEventStop = NULL, hEventThrdReady[2U] = { NULL, NULL }, hEventCompleted[2U] = { NULL, NULL };
-    HANDLE hMyFile = INVALID_HANDLE_VALUE;
+    HANDLE hThreads[MAX_THREADS], hEventStop = NULL, hEventThrdReady[MAX_THREADS], hEventCompleted[MAX_THREADS], hMyFile[MAX_THREADS - 1U];
     int exitCode = 1, argOff = 1;
+    DWORD fileCount = 0U, threadCount = 0U;
     options_t options;
-    thread_t threadData[2U];
 
-    /* Clear options */
+    /* Initialize local variables */
+    SecureZeroMemory(hThreads, sizeof(hThreads));
+    SecureZeroMemory(hEventThrdReady, sizeof(hEventThrdReady));
+    SecureZeroMemory(hEventCompleted, sizeof(hEventCompleted));
     SecureZeroMemory(&options, sizeof(options_t));
+    for (DWORD fileIndex = 0U; fileIndex < ARRAYSIZE(hMyFile); ++fileIndex)
+    {
+        hMyFile[fileIndex] = INVALID_HANDLE_VALUE;
+    }
 
     /* Initialize standard streams */
     const HANDLE hStdIn = GetStdHandle(STD_INPUT_HANDLE), hStdOut = GetStdHandle(STD_OUTPUT_HANDLE), hStdErr = GetStdHandle(STD_ERROR_HANDLE);
@@ -390,9 +412,9 @@ int wmain(const int argc, const wchar_t *const argv[])
     {
         write_text(hStdErr, get_version_string());
         write_text(hStdErr, L"\n"
-            L"Copy standard input to output file, and also to standard output.\n\n"
+            L"Copy standard input to output file(s), and also to standard output.\n\n"
             L"Usage:\n"
-            L"  gizmo.exe [...] | tee.exe [options] <output_file>\n\n"
+            L"  gizmo.exe [...] | tee.exe [options] <file_1> ... <file_n>\n\n"
             L"Options:\n"
             L"  -a --append  Append to the existing file, instead of truncating\n"
             L"  -f --flush   Flush output file after each write operation\n"
@@ -407,26 +429,33 @@ int wmain(const int argc, const wchar_t *const argv[])
         return 1;
     }
 
-    /* Check for excess arguments */
-    if (argOff + 1 < argc)
+    /* Open output file(s) */
+    while ((argOff < argc) && (fileCount < ARRAYSIZE(hMyFile)))
     {
-        write_text(hStdErr, L"[tee] Warning: Excess command line argument(s) ignored!\n");
+        const wchar_t* const fileName = argv[argOff++];
+        if (!is_null_device(fileName))
+        {
+            if ((hMyFile[fileCount++] = CreateFileW(fileName, GENERIC_WRITE, FILE_SHARE_READ, NULL, options.append ? OPEN_ALWAYS : CREATE_ALWAYS, 0U, NULL)) == INVALID_HANDLE_VALUE)
+            {
+                WRITE_TEXT(L"[tee] Error: Failed to open the output file \"", fileName, L"\" for writing!\n");
+                goto cleanup;
+            }
+        }
     }
 
-    /* Open output file */
-    if (!is_null_device(argv[argOff]))
+    /* Check output file name */
+    if (argOff < argc)
     {
-        if ((hMyFile = CreateFileW(argv[argOff], GENERIC_WRITE, FILE_SHARE_READ, NULL, options.append ? OPEN_ALWAYS : CREATE_ALWAYS, 0U, NULL)) == INVALID_HANDLE_VALUE)
-        {
-            WRITE_TEXT(L"[tee] Error: Failed to open the output file \"", argv[argOff], L"\" for writing!\n");
-            goto cleanup;
-        }
+        write_text(hStdErr, L"[tee] Warning: Too many input files, ignoring excess files!\n");
+    }
 
-        /* Seek to the end of the file */
-        if (options.append)
+    /* Seek to the end of the file(s) */
+    if (options.append)
+    {
+        for (DWORD fileIndex = 0U; fileIndex < fileCount; ++fileIndex)
         {
             LARGE_INTEGER offset = { .QuadPart = 0LL };
-            if (!SetFilePointerEx(hMyFile, offset, NULL, FILE_END))
+            if (!SetFilePointerEx(hMyFile[fileIndex], offset, NULL, FILE_END))
             {
                 write_text(hStdErr, L"[tee] Error: Failed to move the file pointer to the end of the file!\n");
                 goto cleanup;
@@ -434,8 +463,8 @@ int wmain(const int argc, const wchar_t *const argv[])
         }
     }
 
-    /* Determine thread count */
-    const DWORD threadCount = (hMyFile != INVALID_HANDLE_VALUE) ? 2U : 1U;
+    /* Determine number of outputs */
+    const DWORD outputCount = fileCount + 1U;
 
     /* Create events */
     if (!(hEventStop = CreateEventW(NULL, TRUE, FALSE, NULL)))
@@ -443,7 +472,7 @@ int wmain(const int argc, const wchar_t *const argv[])
         write_text(hStdErr, L"[tee] System error: Failed to create event object!\n\n");
         goto cleanup;
     }
-    for (size_t threadId = 0U; threadId < threadCount; ++threadId)
+    for (DWORD threadId = 0U; threadId < outputCount; ++threadId)
     {
         if (!(hEventThrdReady[threadId] = CreateEventW(NULL, FALSE, FALSE, NULL)))
         {
@@ -458,9 +487,9 @@ int wmain(const int argc, const wchar_t *const argv[])
     }
 
     /* Set up thread data */
-    for (size_t threadId = 0; threadId < threadCount; ++threadId)
+    for (DWORD threadId = 0; threadId < outputCount; ++threadId)
     {
-        threadData[threadId].hOutput = (threadId > 0U) ? hMyFile : hStdOut;
+        threadData[threadId].hOutput = (threadId > 0U) ? hMyFile[threadId - 1U]: hStdOut;
         threadData[threadId].hError = hStdErr;
         threadData[threadId].flush = options.flush && (!is_terminal(threadData[threadId].hOutput));
         threadData[threadId].hEventReady[0U] = hEventThrdReady[threadId];
@@ -469,9 +498,9 @@ int wmain(const int argc, const wchar_t *const argv[])
     }
 
     /* Start threads */
-    for (DWORD threadId = 0; threadId < threadCount; ++threadId)
+    for (DWORD threadId = 0; threadId < outputCount; ++threadId)
     {
-        if (!(hThreads[threadId] = CreateThread(NULL, 0U, writer_thread_start_routine, &threadData[threadId], 0U, NULL)))
+        if (!(hThreads[threadCount++] = CreateThread(NULL, 0U, writer_thread_start_routine, (LPVOID)(DWORD_PTR)threadId, 0U, NULL)))
         {
             write_text(hStdErr, L"[tee] System error: Failed to create thread!\n");
             goto cleanup;
@@ -512,7 +541,7 @@ int wmain(const int argc, const wchar_t *const argv[])
         }
 
         const DWORD waitResult = WaitForMultipleObjects(threadCount, hEventCompleted, TRUE, INFINITE);
-        if ((waitResult != WAIT_OBJECT_0) && (waitResult != WAIT_OBJECT_0 + 1U))
+        if (!WAIT_SUCCESS(waitResult, threadCount))
         {
             write_text(hStdErr, L"[tee] System error: Failed to wait for events!\n");
             goto cleanup;
@@ -533,15 +562,15 @@ cleanup:
     }
 
     /* Wait for worker threads to exit */
-    const DWORD _threadCount = hThreads[0U] ? (hThreads[1U] ? 2U : 1U) : 0U;
-    if (_threadCount)
+    const DWORD pendingThreads = count_handles(hThreads, ARRAYSIZE(hThreads));
+    if (pendingThreads > 0U)
     {
-        const DWORD waitResult = WaitForMultipleObjects(_threadCount, hThreads, TRUE, 12000U);
-        if ((waitResult != WAIT_OBJECT_0) && (waitResult != WAIT_OBJECT_0 + 1U))
+        const DWORD waitResult = WaitForMultipleObjects(pendingThreads, hThreads, TRUE, 10000U);
+        if (!WAIT_SUCCESS(waitResult, pendingThreads))
         {
-            for (DWORD threadId = 0U; threadId < _threadCount; ++threadId)
+            for (DWORD threadId = 0U; threadId < pendingThreads; ++threadId)
             {
-                if (WaitForSingleObject(hThreads[threadId], 1U) != WAIT_OBJECT_0)
+                if (WaitForSingleObject(hThreads[threadId], 16U) != WAIT_OBJECT_0)
                 {
                     write_text(hStdErr, L"[tee] Error: Worker thread did not exit cleanly!\n");
                     TerminateThread(hThreads[threadId], 1U);
@@ -551,27 +580,36 @@ cleanup:
     }
 
     /* Flush the output file */
-    if ((hMyFile != INVALID_HANDLE_VALUE) && options.flush)
+    if (options.flush)
     {
-        FlushFileBuffers(hMyFile);
+        for (size_t fileIndex = 0U; fileIndex < ARRAYSIZE(hMyFile); ++fileIndex)
+        {
+            if (hMyFile[fileIndex] != INVALID_HANDLE_VALUE)
+            {
+                FlushFileBuffers(hMyFile[fileIndex]);
+            }
+        }
     }
 
     /* Close worker threads */
-    for (DWORD threadId = 0U; threadId < 2U; ++threadId)
+    for (DWORD threadId = 0U; threadId < ARRAYSIZE(hThreads); ++threadId)
     {
         CLOSE_HANDLE(hThreads[threadId]);
     }
 
-    /* Close the output file */
-    CLOSE_HANDLE(hMyFile);
-
     /* Close events */
-    for (DWORD threadId = 0U; threadId < 2U; ++threadId)
+    for (DWORD threadId = 0U; threadId < ARRAYSIZE(hEventThrdReady); ++threadId)
     {
         CLOSE_HANDLE(hEventThrdReady[threadId]);
         CLOSE_HANDLE(hEventCompleted[threadId]);
     }
     CLOSE_HANDLE(hEventStop);
+
+    /* Close the output file(s) */
+    for (size_t fileIndex = 0U; fileIndex < ARRAYSIZE(hMyFile); ++fileIndex)
+    {
+        CLOSE_HANDLE(hMyFile[fileIndex]);
+    }
 
     /* Exit */
     return exitCode;
@@ -581,9 +619,10 @@ cleanup:
 // CRT Startup
 // --------------------------------------------------------------------------
 
+#ifndef _DEBUG
 #pragma warning(disable: 4702)
 
-int wmainCRTStartup(void)
+int _startup(void)
 {
     SetErrorMode(SEM_FAILCRITICALERRORS);
 
@@ -600,3 +639,5 @@ int wmainCRTStartup(void)
 
     return 0;
 }
+
+#endif
