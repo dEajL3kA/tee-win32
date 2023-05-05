@@ -18,6 +18,7 @@
 #define WIN32_LEAN_AND_MEAN 1
 #include <Windows.h>
 #include <ShellAPI.h>
+#include <stdarg.h>
 
 #pragma warning(disable: 4706)
 #define BUFFSIZE 8192U
@@ -26,9 +27,10 @@
  // Utilities
  // --------------------------------------------------------------------------
 
-#define APPEND_STRING(X) do { lstrcpyW(ptr, str##X); ptr += len##X; } while(0)
-
-#define CHAR_TO_LOWER(C) (((C) != L'\0') ? ((wchar_t)(DWORD_PTR)CharLowerW((LPWSTR)(DWORD_PTR)(C))) : L'\0')
+static wchar_t to_lower(const wchar_t c)
+{
+    return ((c >= L'A') && (c <= L'Z')) ? (L'a' + (c - L'A')) : c;
+}
 
 static BOOL is_terminal(const HANDLE handle)
 {
@@ -51,24 +53,37 @@ static const wchar_t *get_filename(const wchar_t *filePath)
 static BOOL is_null_device(const wchar_t *filePath)
 {
     filePath = get_filename(filePath);
-    if ((CHAR_TO_LOWER(filePath[0U]) == L'n') && (CHAR_TO_LOWER(filePath[1U]) == L'u') || (CHAR_TO_LOWER(filePath[2U]) == L'l'))
+    if ((to_lower(filePath[0U]) == L'n') && (to_lower(filePath[1U]) == L'u') || (to_lower(filePath[2U]) == L'l'))
     {
         return ((filePath[3U] == L'\0') || (filePath[3U] == L'.'));
     }
     return FALSE;
 }
 
-static wchar_t *concat_3(const wchar_t *const strA, const wchar_t *const strB, const wchar_t *const strC)
+static wchar_t *concat_va(const wchar_t *const first, ...)
 {
-    const size_t lenA = lstrlenW(strA), lenB = lstrlenW(strB), lenC = lstrlenW(strC);
-    wchar_t *const buffer = (wchar_t*) LocalAlloc(LPTR, sizeof(wchar_t) * (lenA + lenB + lenC + 1U));
+    const wchar_t *ptr;
+    va_list ap;
+
+    va_start(ap, first);
+    size_t len = 0U;
+    for (ptr = first; ptr != NULL; ptr = va_arg(ap, const wchar_t*))
+    {
+        len = lstrlenW(ptr);
+    }
+    va_end(ap);
+
+    wchar_t *const buffer = (wchar_t*)LocalAlloc(LPTR, sizeof(wchar_t) * (len + 1U));
     if (buffer)
     {
-        wchar_t *ptr = buffer;
-        APPEND_STRING(A);
-        APPEND_STRING(B);
-        APPEND_STRING(C);
+        va_start(ap, first);
+        for (ptr = first; ptr != NULL; ptr = va_arg(ap, const wchar_t*))
+        {
+            lstrcatW(buffer, ptr);
+        }
+        va_end(ap);
     }
+
     return buffer;
 }
 
@@ -81,6 +96,8 @@ static wchar_t *concat_3(const wchar_t *const strA, const wchar_t *const strB, c
     } \
 } \
 while (0)
+
+#define CONCAT(...) concat_va(__VA_ARGS__, NULL)
 
 // --------------------------------------------------------------------------
 // Console CTRL+C handler
@@ -196,6 +213,17 @@ static BOOL write_text(const HANDLE handle, const wchar_t *const text)
     return result;
 }
 
+#define WRITE_TEXT(...) do \
+{ \
+    wchar_t* const _message = CONCAT(__VA_ARGS__); \
+    if (_message) \
+    { \
+        write_text(hStdErr, _message); \
+        LocalFree(_message); \
+    } \
+} \
+while (0)
+
 // --------------------------------------------------------------------------
 // Writer thread
 // --------------------------------------------------------------------------
@@ -262,53 +290,39 @@ typedef struct
 }
 options_t;
 
-static BOOL parse_option(options_t *const options, wchar_t c, const wchar_t *const name)
+#define PARSE_OPTION(SHRT, NAME) do \
+{ \
+    if ((lc == L##SHRT) || (name && (lstrcmpiW(name, L#NAME) == 0))) \
+    { \
+        options->NAME = TRUE; \
+        return TRUE; \
+    } \
+} \
+while (0)
+
+static BOOL parse_option(options_t *const options, const wchar_t c, const wchar_t *const name)
 {
-    c = CHAR_TO_LOWER(c);
+    const wchar_t lc = to_lower(c);
 
-    if ((c == L'a') || (name && (lstrcmpiW(name, L"append") == 0)))
-    {
-        options->append = TRUE;
-        return TRUE;
-    }
+    PARSE_OPTION('a', append);
+    PARSE_OPTION('f', flush);
+    PARSE_OPTION('i', ignore);
+    PARSE_OPTION('h', help);
+    PARSE_OPTION('v', version);
 
-    if ((c == L'f') || (name && (lstrcmpiW(name, L"flush") == 0)))
-    {
-        options->flush = TRUE;
-        return TRUE;
-    }
-
-    if ((c == L'i') || (name && (lstrcmpiW(name, L"ignore") == 0)))
-    {
-        options->ignore = TRUE;
-        return TRUE;
-    }
-
-    if ((c == L'h') || (name && (lstrcmpiW(name, L"help") == 0)))
-    {
-        options->help = TRUE;
-        return TRUE;
-    }
-
-    if ((c == L'v') || (name && (lstrcmpiW(name, L"version") == 0)))
-    {
-        options->version = TRUE;
-        return TRUE;
-    }
-
-    return FALSE; /*unknown option*/
+    return FALSE;
 }
 
 static BOOL parse_argument(options_t *const options, const wchar_t *const argument)
 {
-    if (argument[0U] != L'-')
+    if ((argument[0U] != L'-') || (argument[1U] == L'\0'))
     {
         return FALSE;
     }
 
     if (argument[1U] == L'-')
     {
-        return parse_option(options, L'\0', argument + 2U);
+        return (argument[2U] != L'\0') && parse_option(options, L'\0', argument + 2U);
     }
     else
     {
@@ -359,12 +373,7 @@ int wmain(const int argc, const wchar_t *const argv[])
         }
         else if (!parse_argument(&options, argValue))
         {
-            wchar_t* const message = concat_3(L"[tee] Error: Invalid option \"", argValue, L"\" encountered!\n");
-            if (message)
-            {
-                write_text(hStdErr, message);
-                LocalFree(message);
-            }
+            WRITE_TEXT(L"[tee] Error: Invalid option \"", argValue, L"\" encountered!\n");
             return 1;
         }
     }
@@ -398,12 +407,18 @@ int wmain(const int argc, const wchar_t *const argv[])
         return 1;
     }
 
+    /* Check for excess arguments */
+    if (argOff + 1 < argc)
+    {
+        write_text(hStdErr, L"[tee] Warning: Excess command line argument(s) ignored!\n");
+    }
+
     /* Open output file */
     if (!is_null_device(argv[argOff]))
     {
         if ((hMyFile = CreateFileW(argv[argOff], GENERIC_WRITE, FILE_SHARE_READ, NULL, options.append ? OPEN_ALWAYS : CREATE_ALWAYS, 0U, NULL)) == INVALID_HANDLE_VALUE)
         {
-            write_text(hStdErr, L"[tee] Error: Failed to open the output file for writing!\n");
+            WRITE_TEXT(L"[tee] Error: Failed to open the output file \"", argv[argOff], L"\" for writing!\n");
             goto cleanup;
         }
 
