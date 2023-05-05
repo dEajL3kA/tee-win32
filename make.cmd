@@ -40,6 +40,9 @@ if not "%ERRORLEVEL%"=="0" goto BuildError
 MSBuild.exe /property:Platform=x64 /property:Configuration=Release /target:rebuild "%CD%\%SOLUTION_FILE%"
 if not "%ERRORLEVEL%"=="0" goto BuildError
 
+MSBuild.exe /property:Platform=a64 /property:Configuration=Release /target:rebuild "%CD%\%SOLUTION_FILE%"
+if not "%ERRORLEVEL%"=="0" goto BuildError
+
 REM ------------------------------------------------------------
 REM COPY FILES
 REM ------------------------------------------------------------
@@ -48,12 +51,15 @@ if not exist "%CD%\out\" mkdir "%CD%\out"
 
 if exist "%CD%\out\tee-x86.exe" del /F "%CD%\out\tee-x86.exe"
 if exist "%CD%\out\tee-x64.exe" del /F "%CD%\out\tee-x64.exe"
+if exist "%CD%\out\tee-a64.exe" del /F "%CD%\out\tee-a64.exe"
 
 copy /Y /B "%CD%\bin\Win32\Release\tee.exe" "%CD%\out\tee-x86.exe"
 copy /Y /B "%CD%\bin\x64\.\Release\tee.exe" "%CD%\out\tee-x64.exe"
+copy /Y /B "%CD%\bin\ARM64\Release\tee.exe" "%CD%\out\tee-a64.exe"
 
 attrib +R "%CD%\out\tee-x86.exe"
 attrib +R "%CD%\out\tee-x64.exe"
+attrib +R "%CD%\out\tee-a64.exe"
 
 REM ------------------------------------------------------------
 REM COMPLETED

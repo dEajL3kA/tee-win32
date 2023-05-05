@@ -8,7 +8,7 @@
 
 #define MY_VERSION_MAJOR 1
 #define MY_VERSION_MINOR 1
-#define MY_VERSION_PATCH 2
+#define MY_VERSION_PATCH 3
 
 #define MY_VERSION_NUMBER MY_VERSION_MAJOR, MY_VERSION_MINOR, MY_VERSION_PATCH, 0
 #define ___MY_VERSION_STRING(X) #X
@@ -16,10 +16,14 @@
 #define _MY_VERSION_STRING(X,Y,Z) __MY_VERSION_STRING(X,Y,Z)
 #define MY_VERSION_STRING _MY_VERSION_STRING(MY_VERSION_MAJOR, MY_VERSION_MINOR, MY_VERSION_PATCH)
 
-#ifdef _WIN64
+#ifdef _M_ARM64
+#define MY_ARCH_SUFFIX "(a64)"
+#else
+#ifdef _M_X64
 #define MY_ARCH_SUFFIX "(x64)"
 #else
 #define MY_ARCH_SUFFIX "(x86)"
+#endif
 #endif
 
 /////////////////////////////////////////////////////////////////////////////
