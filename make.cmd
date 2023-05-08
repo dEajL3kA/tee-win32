@@ -5,6 +5,10 @@ if "%MSVC_PATH%"=="" (
 	set "MSVC_PATH=C:\Program Files (x86)\Microsoft Visual Studio\2019\Community"
 )
 
+if "%PANDOC_EXE%"=="" (
+	set "PANDOC_EXE=C:\Program Files\Pandoc\pandoc.exe"
+)
+
 set "SOLUTION_FILE=tee.sln"
 
 if exist "%MSVC_PATH%\VC\Auxiliary\Build\vcvarsall.bat" (
@@ -60,6 +64,16 @@ copy /Y /B "%CD%\bin\ARM64\Release\tee.exe" "%CD%\out\tee-a64.exe"
 attrib +R "%CD%\out\tee-x86.exe"
 attrib +R "%CD%\out\tee-x64.exe"
 attrib +R "%CD%\out\tee-a64.exe"
+
+REM ------------------------------------------------------------
+REM CREATE DOCS
+REM ------------------------------------------------------------
+
+if exist "%CD%\out\README.html" del /F "%CD%\out\README.html"
+
+"%PANDOC_EXE%" -f markdown -t html5 --metadata pagetitle="tee for Windows" --embed-resources --standalone --css "%CD%\etc\style\github-markdown.css" -o "%CD%\out\README.html" "%CD%\README.md"
+
+attrib +R "%CD%\out\README.html"
 
 REM ------------------------------------------------------------
 REM COMPLETED

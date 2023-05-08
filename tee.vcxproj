@@ -268,17 +268,10 @@
     <ClCompile Include="tee.c" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="tee.rc">
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">_WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">_M_X64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">_M_ARM64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">_WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">_M_X64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">_M_ARM64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-    </ResourceCompile>
+    <Manifest Include="etc\resources\compatibility.manifest" />
   </ItemGroup>
   <ItemGroup>
-    <Manifest Include="compatibility.manifest" />
+    <ResourceCompile Include="etc\resources\tee.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

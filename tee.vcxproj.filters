@@ -20,13 +20,13 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="tee.rc">
-      <Filter>Ressourcendateien</Filter>
-    </ResourceCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <Manifest Include="compatibility.manifest">
+    <Manifest Include="etc\resources\compatibility.manifest">
       <Filter>Ressourcendateien</Filter>
     </Manifest>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="etc\resources\tee.rc">
+      <Filter>Ressourcendateien</Filter>
+    </ResourceCompile>
   </ItemGroup>
 </Project>

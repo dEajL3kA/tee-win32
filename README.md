@@ -2,7 +2,7 @@
 
 A simple [**`tee`**](https://en.wikipedia.org/wiki/Tee_(command)) implementation for Microsoft Windows.
 
-![tee](tee.png)  
+![tee](etc/images/tee.png)  
 <small>(image created by [Sven](https://commons.wikimedia.org/wiki/User:Sven), CC BY-SA 4.0)</small>
 
 ## Usage
@@ -33,7 +33,7 @@ This application requires Windows Vista or later. All 32-Bit and 64-Bit editions
 
 ## License
 
-Copyright (c) 2023 "dEajL3kA" &lt;Cumpoing79@web.de&gt;  
+Copyright (c) 2023 “dEajL3kA” &lt;Cumpoing79@web.de&gt;  
 This work has been released under the MIT license. See [LICENSE.txt](LICENSE.txt) for details!
 
 ### Acknowledgement
