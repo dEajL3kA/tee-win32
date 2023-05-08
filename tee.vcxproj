@@ -273,6 +273,9 @@
   <ItemGroup>
     <ResourceCompile Include="etc\resources\tee.rc" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="etc\resources\version.h" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

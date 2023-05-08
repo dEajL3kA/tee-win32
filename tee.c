@@ -1,5 +1,5 @@
 /*
- * CertViewer - tee for Windows
+ * tee for Windows
  * Copyright (c) 2023 "dEajL3kA" <Cumpoing79@web.de>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
@@ -61,6 +61,7 @@ static const wchar_t *get_filename(const wchar_t *filePath)
             filePath = ptr + 1U;
         }
     }
+
     return filePath;
 }
 
@@ -71,7 +72,20 @@ static BOOL is_null_device(const wchar_t *filePath)
     {
         return ((filePath[3U] == L'\0') || (filePath[3U] == L'.'));
     }
+
     return FALSE;
+}
+
+static wchar_t *format_string(const wchar_t *const format, ...)
+{
+    wchar_t* buffer = NULL;
+    va_list ap;
+
+    va_start(ap, format);
+    const DWORD result = FormatMessageW(FORMAT_MESSAGE_FROM_STRING | FORMAT_MESSAGE_ALLOCATE_BUFFER, format, 0U, 0U, (LPWSTR)&buffer, 1U, &ap);
+    va_end(ap);
+
+    return result ? buffer : NULL;
 }
 
 static wchar_t *concat_va(const wchar_t *const first, ...)
@@ -101,17 +115,28 @@ static wchar_t *concat_va(const wchar_t *const first, ...)
     return buffer;
 }
 
+#define CONCAT(...) concat_va(__VA_ARGS__, NULL)
+
+#define VALID_HANDLE(HANDLE) (((HANDLE) != NULL) && ((HANDLE) != INVALID_HANDLE_VALUE))
+
+#define FILL_ARRAY(ARRAY, VALUE) do \
+{ \
+    for (size_t _index = 0U; _index < ARRAYSIZE(ARRAY); ++_index) \
+    { \
+        ARRAY[_index] = (VALUE); \
+    } \
+} \
+while (0)
+
 #define CLOSE_HANDLE(HANDLE) do \
 { \
-    if (((HANDLE) != NULL) && ((HANDLE) != INVALID_HANDLE_VALUE)) \
+    if (VALID_HANDLE(HANDLE)) \
     { \
         CloseHandle((HANDLE)); \
         (HANDLE) = NULL; \
     } \
 } \
 while (0)
-
-#define CONCAT(...) concat_va(__VA_ARGS__, NULL)
 
 // --------------------------------------------------------------------------
 // Console CTRL+C handler
@@ -137,7 +162,13 @@ static BOOL WINAPI console_handler(const DWORD ctrlType)
 // Version
 // --------------------------------------------------------------------------
 
-static ULONGLONG get_version(void)
+typedef struct
+{
+    WORD major, minor, patch, build;
+}
+version_t;
+
+static BOOL get_version_info(version_t *const versionInfo)
 {
     const HRSRC hVersion = FindResourceW(NULL, MAKEINTRESOURCE(VS_VERSION_INFO), RT_VERSION);
     if (hVersion)
@@ -155,33 +186,30 @@ static ULONGLONG get_version(void)
                     UINT fileInfoSize;
                     if (VerQueryValueW(addrResourceBlock, L"\\", &fileInfoData, &fileInfoSize))
                     {
-                        ULARGE_INTEGER fileVersion;
-                        fileVersion.LowPart  = fileInfoData->dwFileVersionLS;
-                        fileVersion.HighPart = fileInfoData->dwFileVersionMS;
-                        return fileVersion.QuadPart;
+                        versionInfo->major = HIWORD(fileInfoData->dwFileVersionMS);
+                        versionInfo->minor = LOWORD(fileInfoData->dwFileVersionMS);
+                        versionInfo->patch = HIWORD(fileInfoData->dwFileVersionLS);
+                        versionInfo->build = LOWORD(fileInfoData->dwFileVersionLS);
+                        return TRUE;
                     }
                 }
             }
         }
     }
 
-    return 0U;
+    versionInfo->major = versionInfo->minor = versionInfo->patch = versionInfo->build = 0U;
+    return FALSE;
 }
 
-static const wchar_t *create_version_string(void)
+static wchar_t *get_version_string(void)
 {
-    static wchar_t buffer[64U];
-    const ULONGLONG version = get_version();
-    if (version)
+    version_t version;
+    if (get_version_info(&version))
     {
-        DWORD_PTR args[] = { (DWORD_PTR)((version >> 48) & 0xFFFF), (DWORD_PTR)((version >> 32) & 0xFFFF), (DWORD_PTR)((version >> 16) & 0xFFFF), (DWORD_PTR)TEXT(__DATE__) };
-        if (FormatMessageW(FORMAT_MESSAGE_ARGUMENT_ARRAY | FORMAT_MESSAGE_FROM_STRING, L"tee for Windows v%1!u!.%2!u!.%3!u! [%4!s!]\n", 0U, 0U, buffer, ARRAYSIZE(buffer), (va_list*)args))
-        {
-            return buffer;
-        }
+        return format_string(L"tee for Windows v%1!u!.%2!u!.%3!u! [%4!s!]\n", version.major, version.minor, version.patch, TEXT(__DATE__));
     }
 
-    return L"tee for Windows\n";
+    return NULL;
 }
 
 // --------------------------------------------------------------------------
@@ -204,6 +232,7 @@ static char *utf16_to_utf8(const wchar_t *const input)
             LocalFree(buffer);
         }
     }
+
     return NULL;
 }
 
@@ -211,6 +240,7 @@ static BOOL write_text(const HANDLE handle, const wchar_t *const text)
 {
     BOOL result = FALSE;
     DWORD written;
+
     if (GetConsoleMode(handle, &written))
     {
         result = WriteConsoleW(handle, text, lstrlenW(text), &written, NULL);
@@ -224,6 +254,7 @@ static BOOL write_text(const HANDLE handle, const wchar_t *const text)
             LocalFree(utf8_text);
         }
     }
+
     return result;
 }
 
@@ -249,42 +280,42 @@ typedef struct
 }
 thread_t;
 
-static thread_t threadData[MAX_THREADS];
-static BYTE buffer[2U][BUFFSIZE];
-static DWORD bytesTotal[2U] = { 0U, 0U }, pending = 0U, index = 0U;
-static CRITICAL_SECTION criticalSection;
-static CONDITION_VARIABLE condIsReady, condAllDone;
+static thread_t g_threadData[MAX_THREADS];
+static BYTE g_buffer[2U][BUFFSIZE];
+static DWORD g_bytesTotal[2U] = { 0U, 0U }, g_pending = 0U, g_index = 0U;
+static CRITICAL_SECTION g_criticalSection;
+static CONDITION_VARIABLE g_condIsReady, g_condAllDone;
 
 static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 {
     DWORD bytesWritten, myIndex = 0U;
-    const thread_t* const param = &threadData[(DWORD_PTR)lpThreadParameter];
+    const thread_t *const param = &g_threadData[(DWORD_PTR)lpThreadParameter];
 
-    EnterCriticalSection(&criticalSection);
+    EnterCriticalSection(&g_criticalSection);
 
     for (;;)
     {
-        while (index == myIndex)
+        while (g_index == myIndex)
         {
-            if (!SleepConditionVariableCS(&condIsReady, &criticalSection, INFINITE))
+            if (!SleepConditionVariableCS(&g_condIsReady, &g_criticalSection, INFINITE))
             {
-                LeaveCriticalSection(&criticalSection);
+                LeaveCriticalSection(&g_criticalSection);
                 write_text(param->hError, L"[tee] System error: Failed to sleep on conditional variable!\n");
                 return 1U;
             }
         }
 
-        myIndex = index;
-        LeaveCriticalSection(&criticalSection);
+        myIndex = g_index;
+        LeaveCriticalSection(&g_criticalSection);
 
         if (myIndex == MAXDWORD)
         {
             return 0U;
         }
 
-        for (DWORD offset = 0U; offset < bytesTotal[myIndex]; offset += bytesWritten)
+        for (DWORD offset = 0U; offset < g_bytesTotal[myIndex]; offset += bytesWritten)
         {
-            const BOOL result = WriteFile(param->hOutput, buffer[myIndex] + offset, bytesTotal[myIndex] - offset, &bytesWritten, NULL);
+            const BOOL result = WriteFile(param->hOutput, g_buffer[myIndex] + offset, g_bytesTotal[myIndex] - offset, &bytesWritten, NULL);
             if ((!result) || (!bytesWritten))
             {
                 write_text(param->hError, L"[tee] Error: Not all data could be written!\n");
@@ -292,18 +323,18 @@ static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
             }
         }
 
-        EnterCriticalSection(&criticalSection);
+        EnterCriticalSection(&g_criticalSection);
 
-        if (!(--pending))
+        if (!(--g_pending))
         {
-            WakeConditionVariable(&condAllDone);
+            WakeConditionVariable(&g_condAllDone);
         }
 
         if (param->flush)
         {
-            LeaveCriticalSection(&criticalSection);
+            LeaveCriticalSection(&g_criticalSection);
             FlushFileBuffers(param->hOutput);
-            EnterCriticalSection(&criticalSection);
+            EnterCriticalSection(&g_criticalSection);
         }
     }
 }
@@ -372,23 +403,21 @@ static BOOL parse_argument(options_t *const options, const wchar_t *const argume
 
 int wmain(const int argc, const wchar_t *const argv[])
 {
-    HANDLE hThreads[MAX_THREADS], hMyFile[MAX_THREADS - 1U];
+    HANDLE hThreads[MAX_THREADS], hMyFiles[MAX_THREADS - 1U];
     int exitCode = 1, argOff = 1;
     DWORD fileCount = 0U, threadCount = 0U;
     options_t options;
 
     /* Initialize local variables */
-    SecureZeroMemory(hThreads, sizeof(hThreads));
+    FILL_ARRAY(hMyFiles, INVALID_HANDLE_VALUE);
+    FILL_ARRAY(hThreads, NULL);
     SecureZeroMemory(&options, sizeof(options_t));
-    for (DWORD fileIndex = 0U; fileIndex < ARRAYSIZE(hMyFile); ++fileIndex)
-    {
-        hMyFile[fileIndex] = INVALID_HANDLE_VALUE;
-    }
 
     /* Initialize standard streams */
     const HANDLE hStdIn = GetStdHandle(STD_INPUT_HANDLE), hStdOut = GetStdHandle(STD_OUTPUT_HANDLE), hStdErr = GetStdHandle(STD_ERROR_HANDLE);
-    if ((hStdIn == INVALID_HANDLE_VALUE) || (hStdOut == INVALID_HANDLE_VALUE) || (hStdErr == INVALID_HANDLE_VALUE))
+    if (!(VALID_HANDLE(hStdIn) && VALID_HANDLE(hStdOut) && VALID_HANDLE(hStdErr)))
     {
+        OutputDebugStringA("[tee-win32] System error: Failed to initialize standard handles!\n");
         return -1;
     }
 
@@ -410,26 +439,27 @@ int wmain(const int argc, const wchar_t *const argv[])
         }
     }
 
-    /* Print version information */
-    if (options.version)
-    {
-        write_text(hStdErr, create_version_string());
-        return 0;
-    }
-
     /* Print manual page */
-    if (options.help)
+    if (options.help || options.version)
     {
-        write_text(hStdErr, create_version_string());
-        write_text(hStdErr, L"\n"
-            L"Copy standard input to output file(s), and also to standard output.\n\n"
-            L"Usage:\n"
-            L"  gizmo.exe [...] | tee.exe [options] <file_1> ... <file_n>\n\n"
-            L"Options:\n"
-            L"  -a --append  Append to the existing file, instead of truncating\n"
-            L"  -f --flush   Flush output file after each write operation\n"
-            L"  -i --ignore  Ignore the interrupt signal (SIGINT), e.g. CTRL+C\n"
-            L"  -d --delay   Add a small delay after each read operation\n\n");
+        wchar_t *const versionString = get_version_string();
+        write_text(hStdErr, versionString ? versionString : L"tee for Windows.\n");
+        if (options.help)
+        {
+            write_text(hStdErr, L"\n"
+                L"Copy standard input to output file(s), and also to standard output.\n\n"
+                L"Usage:\n"
+                L"  gizmo.exe [...] | tee.exe [options] <file_1> ... <file_n>\n\n"
+                L"Options:\n"
+                L"  -a --append  Append to the existing file, instead of truncating\n"
+                L"  -f --flush   Flush output file after each write operation\n"
+                L"  -i --ignore  Ignore the interrupt signal (SIGINT), e.g. CTRL+C\n"
+                L"  -d --delay   Add a small delay after each read operation\n\n");
+        }
+        if (versionString)
+        {
+            LocalFree(versionString);
+        }
         return 0;
     }
 
@@ -441,24 +471,24 @@ int wmain(const int argc, const wchar_t *const argv[])
     }
 
     /* Initialize critical section */
-    if (!InitializeCriticalSectionAndSpinCount(&criticalSection, 4000U))
+    if (!InitializeCriticalSectionAndSpinCount(&g_criticalSection, 4000U))
     {
         write_text(hStdErr, L"[tee] System error: Failed to initialize critical section!\n");
         return 1;
     }
 
     /* Initialize cond variables */
-    InitializeConditionVariable(&condIsReady);
-    InitializeConditionVariable(&condAllDone);
+    InitializeConditionVariable(&g_condIsReady);
+    InitializeConditionVariable(&g_condAllDone);
 
     /* Open output file(s) */
-    while ((argOff < argc) && (fileCount < ARRAYSIZE(hMyFile)))
+    while ((argOff < argc) && (fileCount < ARRAYSIZE(hMyFiles)))
     {
         const wchar_t* const fileName = argv[argOff++];
         if (!is_null_device(fileName))
         {
             const HANDLE hFile = CreateFileW(fileName, GENERIC_WRITE, FILE_SHARE_READ, NULL, options.append ? OPEN_ALWAYS : CREATE_ALWAYS, 0U, NULL);
-            if ((hMyFile[fileCount++] = hFile) == INVALID_HANDLE_VALUE)
+            if ((hMyFiles[fileCount++] = hFile) == INVALID_HANDLE_VALUE)
             {
                 WRITE_TEXT(L"[tee] Error: Failed to open the output file \"", fileName, L"\" for writing!\n");
                 goto cleanup;
@@ -487,9 +517,9 @@ int wmain(const int argc, const wchar_t *const argv[])
     /* Start threads */
     for (DWORD threadId = 0; threadId < outputCount; ++threadId)
     {
-        threadData[threadId].hOutput = (threadId > 0U) ? hMyFile[threadId - 1U] : hStdOut;
-        threadData[threadId].hError = hStdErr;
-        threadData[threadId].flush = options.flush && (!is_terminal(threadData[threadId].hOutput));
+        g_threadData[threadId].hOutput = (threadId > 0U) ? hMyFiles[threadId - 1U] : hStdOut;
+        g_threadData[threadId].hError = hStdErr;
+        g_threadData[threadId].flush = options.flush && (!is_terminal(g_threadData[threadId].hOutput));
         if (!(hThreads[threadCount++] = CreateThread(NULL, 0U, writer_thread_start_routine, (LPVOID)(DWORD_PTR)threadId, 0U, NULL)))
         {
             write_text(hStdErr, L"[tee] System error: Failed to create thread!\n");
@@ -506,7 +536,7 @@ int wmain(const int argc, const wchar_t *const argv[])
     /* Process all input from STDIN stream */
     do
     {
-        if (!ReadFile(hStdIn, buffer[myIndex], BUFFSIZE, &bytesTotal[myIndex], NULL))
+        if (!ReadFile(hStdIn, g_buffer[myIndex], BUFFSIZE, &g_bytesTotal[myIndex], NULL))
         {
             if (GetLastError() != ERROR_BROKEN_PIPE)
             {
@@ -516,29 +546,29 @@ int wmain(const int argc, const wchar_t *const argv[])
             break;
         }
 
-        if ((!bytesTotal[myIndex]) && (!isPipeInput)) /*pipes may return zero bytes, even when more data can become available later!*/
+        if ((!g_bytesTotal[myIndex]) && (!isPipeInput)) /*pipes may return zero bytes, even when more data can become available later!*/
         {
             break;
         }
 
-        EnterCriticalSection(&criticalSection);
+        EnterCriticalSection(&g_criticalSection);
 
-        while (pending > 0U)
+        while (g_pending > 0U)
         {
-            if (!SleepConditionVariableCS(&condAllDone, &criticalSection, INFINITE))
+            if (!SleepConditionVariableCS(&g_condAllDone, &g_criticalSection, INFINITE))
             {
-                LeaveCriticalSection(&criticalSection);
+                LeaveCriticalSection(&g_criticalSection);
                 write_text(hStdErr, L"[tee] System error: Failed to sleep on conditional variable!\n");
                 goto cleanup;
             }
         }
 
-        pending = threadCount;
-        index = myIndex;
+        g_pending = threadCount;
+        g_index = myIndex;
         myIndex = 1U - myIndex;
 
-        LeaveCriticalSection(&criticalSection);
-        WakeAllConditionVariable(&condIsReady);
+        LeaveCriticalSection(&g_criticalSection);
+        WakeAllConditionVariable(&g_condIsReady);
 
         if (options.delay)
         {
@@ -552,10 +582,10 @@ int wmain(const int argc, const wchar_t *const argv[])
 cleanup:
 
     /* Stop the worker threads */
-    EnterCriticalSection(&criticalSection);
-    index = MAXDWORD;
-    LeaveCriticalSection(&criticalSection);
-    WakeAllConditionVariable(&condIsReady);
+    EnterCriticalSection(&g_criticalSection);
+    g_index = MAXDWORD;
+    LeaveCriticalSection(&g_criticalSection);
+    WakeAllConditionVariable(&g_condIsReady);
 
     /* Wait for worker threads to exit */
     const DWORD pendingThreads = count_handles(hThreads, ARRAYSIZE(hThreads));
@@ -578,11 +608,11 @@ cleanup:
     /* Flush the output file */
     if (options.flush)
     {
-        for (size_t fileIndex = 0U; fileIndex < ARRAYSIZE(hMyFile); ++fileIndex)
+        for (size_t fileIndex = 0U; fileIndex < ARRAYSIZE(hMyFiles); ++fileIndex)
         {
-            if (hMyFile[fileIndex] != INVALID_HANDLE_VALUE)
+            if (hMyFiles[fileIndex] != INVALID_HANDLE_VALUE)
             {
-                FlushFileBuffers(hMyFile[fileIndex]);
+                FlushFileBuffers(hMyFiles[fileIndex]);
             }
         }
     }
@@ -594,13 +624,13 @@ cleanup:
     }
 
     /* Close the output file(s) */
-    for (size_t fileIndex = 0U; fileIndex < ARRAYSIZE(hMyFile); ++fileIndex)
+    for (size_t fileIndex = 0U; fileIndex < ARRAYSIZE(hMyFiles); ++fileIndex)
     {
-        CLOSE_HANDLE(hMyFile[fileIndex]);
+        CLOSE_HANDLE(hMyFiles[fileIndex]);
     }
 
     /* Delete critical section */
-    DeleteCriticalSection(&criticalSection);
+    DeleteCriticalSection(&g_criticalSection);
 
     /* Exit */
     return exitCode;
@@ -621,6 +651,7 @@ int _startup(void)
     LPWSTR *const szArglist = CommandLineToArgvW(GetCommandLineW(), &nArgs);
     if (!szArglist)
     {
+        OutputDebugStringA("[tee-win32] System error: Failed to initialize command-line arguments!\n");
         ExitProcess((UINT)-1);
     }
 
