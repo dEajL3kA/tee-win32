@@ -21,7 +21,7 @@
 #include <stdarg.h>
 
 #define BUFFSIZE 8192U
-#define MAX_THREADS (MAXIMUM_WAIT_OBJECTS >> 1)
+#define MAX_THREADS MAXIMUM_WAIT_OBJECTS
 
  // --------------------------------------------------------------------------
  // Utilities
@@ -113,8 +113,6 @@ while (0)
 
 #define CONCAT(...) concat_va(__VA_ARGS__, NULL)
 
-#define WAIT_SUCCESS(RESULT, COUNT) (((RESULT) >= WAIT_OBJECT_0) && ((RESULT) < WAIT_OBJECT_0 + (COUNT)))
-
 // --------------------------------------------------------------------------
 // Console CTRL+C handler
 // --------------------------------------------------------------------------
@@ -170,20 +168,20 @@ static ULONGLONG get_version(void)
     return 0U;
 }
 
-static const wchar_t *get_version_string(void)
+static const wchar_t *create_version_string(void)
 {
-    static wchar_t text[64U] = { '\0' };
-    lstrcpyW(text, L"tee for Windows v#.#.# [" TEXT(__DATE__) L"]\n");
-
+    static wchar_t buffer[64U];
     const ULONGLONG version = get_version();
     if (version)
     {
-        text[17U] = L'0' + ((version >> 48) & 0xFFFF);
-        text[19U] = L'0' + ((version >> 32) & 0xFFFF);
-        text[21U] = L'0' + ((version >> 16) & 0xFFFF);
+        DWORD_PTR args[] = { (DWORD_PTR)((version >> 48) & 0xFFFF), (DWORD_PTR)((version >> 32) & 0xFFFF), (DWORD_PTR)((version >> 16) & 0xFFFF), (DWORD_PTR)TEXT(__DATE__) };
+        if (FormatMessageW(FORMAT_MESSAGE_ARGUMENT_ARRAY | FORMAT_MESSAGE_FROM_STRING, L"tee for Windows v%1!u!.%2!u!.%3!u! [%4!s!]\n", 0U, 0U, buffer, ARRAYSIZE(buffer), (va_list*)args))
+        {
+            return buffer;
+        }
     }
 
-    return text;
+    return L"tee for Windows\n";
 }
 
 // --------------------------------------------------------------------------
@@ -248,35 +246,41 @@ typedef struct
 {
     HANDLE hOutput, hError;
     BOOL flush;
-    HANDLE hEventReady[2U], hEventCompleted;
 }
 thread_t;
 
 static thread_t threadData[MAX_THREADS];
 static BYTE buffer[2U][BUFFSIZE];
-static DWORD bytesTotal[2U] = { 0U, 0U };
-static volatile ULONG_PTR index = 0U;
+static DWORD bytesTotal[2U] = { 0U, 0U }, pending = 0U, index = 0U;
+static CRITICAL_SECTION criticalSection;
+static CONDITION_VARIABLE condIsReady, condAllDone;
 
 static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 {
-    DWORD bytesWritten;
-    const thread_t *const param = &threadData[(DWORD_PTR)lpThreadParameter];
- 
+    DWORD bytesWritten, myIndex = 0U;
+    const thread_t* const param = &threadData[(DWORD_PTR)lpThreadParameter];
+
+    EnterCriticalSection(&criticalSection);
+
     for (;;)
     {
-        switch (WaitForMultipleObjects(2U, param->hEventReady, FALSE, INFINITE))
+        while (index == myIndex)
         {
-        case WAIT_OBJECT_0:
-            break;
-        case WAIT_OBJECT_0 + 1U:
-            SetEvent(param->hEventCompleted);
-            return 0U;
-        default:
-            write_text(param->hError, L"[tee] System error: Failed to wait for event!\n");
-            return 1U;
+            if (!SleepConditionVariableCS(&condIsReady, &criticalSection, INFINITE))
+            {
+                LeaveCriticalSection(&criticalSection);
+                write_text(param->hError, L"[tee] System error: Failed to sleep on conditional variable!\n");
+                return 1U;
+            }
         }
 
-        const ULONG_PTR myIndex = index;
+        myIndex = index;
+        LeaveCriticalSection(&criticalSection);
+
+        if (myIndex == MAXDWORD)
+        {
+            return 0U;
+        }
 
         for (DWORD offset = 0U; offset < bytesTotal[myIndex]; offset += bytesWritten)
         {
@@ -288,11 +292,18 @@ static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
             }
         }
 
-        SetEvent(param->hEventCompleted);
+        EnterCriticalSection(&criticalSection);
+
+        if (!(--pending))
+        {
+            WakeConditionVariable(&condAllDone);
+        }
 
         if (param->flush)
         {
+            LeaveCriticalSection(&criticalSection);
             FlushFileBuffers(param->hOutput);
+            EnterCriticalSection(&criticalSection);
         }
     }
 }
@@ -360,15 +371,13 @@ static BOOL parse_argument(options_t *const options, const wchar_t *const argume
 
 int wmain(const int argc, const wchar_t *const argv[])
 {
-    HANDLE hThreads[MAX_THREADS], hEventStop = NULL, hEventThrdReady[MAX_THREADS], hEventCompleted[MAX_THREADS], hMyFile[MAX_THREADS - 1U];
+    HANDLE hThreads[MAX_THREADS], hMyFile[MAX_THREADS - 1U];
     int exitCode = 1, argOff = 1;
     DWORD fileCount = 0U, threadCount = 0U;
     options_t options;
 
     /* Initialize local variables */
     SecureZeroMemory(hThreads, sizeof(hThreads));
-    SecureZeroMemory(hEventThrdReady, sizeof(hEventThrdReady));
-    SecureZeroMemory(hEventCompleted, sizeof(hEventCompleted));
     SecureZeroMemory(&options, sizeof(options_t));
     for (DWORD fileIndex = 0U; fileIndex < ARRAYSIZE(hMyFile); ++fileIndex)
     {
@@ -403,14 +412,14 @@ int wmain(const int argc, const wchar_t *const argv[])
     /* Print version information */
     if (options.version)
     {
-        write_text(hStdErr, get_version_string());
+        write_text(hStdErr, create_version_string());
         return 0;
     }
 
     /* Print manual page */
     if (options.help)
     {
-        write_text(hStdErr, get_version_string());
+        write_text(hStdErr, create_version_string());
         write_text(hStdErr, L"\n"
             L"Copy standard input to output file(s), and also to standard output.\n\n"
             L"Usage:\n"
@@ -429,16 +438,37 @@ int wmain(const int argc, const wchar_t *const argv[])
         return 1;
     }
 
+    /* Initialize critical section */
+    if (!InitializeCriticalSectionAndSpinCount(&criticalSection, 4096U))
+    {
+        write_text(hStdErr, L"[tee] System error: Failed to initialize critical section!\n");
+        return 1;
+    }
+
+    /* Initialize cond variables */
+    InitializeConditionVariable(&condIsReady);
+    InitializeConditionVariable(&condAllDone);
+
     /* Open output file(s) */
     while ((argOff < argc) && (fileCount < ARRAYSIZE(hMyFile)))
     {
         const wchar_t* const fileName = argv[argOff++];
         if (!is_null_device(fileName))
         {
-            if ((hMyFile[fileCount++] = CreateFileW(fileName, GENERIC_WRITE, FILE_SHARE_READ, NULL, options.append ? OPEN_ALWAYS : CREATE_ALWAYS, 0U, NULL)) == INVALID_HANDLE_VALUE)
+            const HANDLE hFile = CreateFileW(fileName, GENERIC_WRITE, FILE_SHARE_READ, NULL, options.append ? OPEN_ALWAYS : CREATE_ALWAYS, 0U, NULL);
+            if ((hMyFile[fileCount++] = hFile) == INVALID_HANDLE_VALUE)
             {
                 WRITE_TEXT(L"[tee] Error: Failed to open the output file \"", fileName, L"\" for writing!\n");
                 goto cleanup;
+            }
+            else if (options.append)
+            {
+                LARGE_INTEGER offset = { .QuadPart = 0LL };
+                if (!SetFilePointerEx(hFile, offset, NULL, FILE_END))
+                {
+                    write_text(hStdErr, L"[tee] Error: Failed to move the file pointer to the end of the file!\n");
+                    goto cleanup;
+                }
             }
         }
     }
@@ -449,57 +479,15 @@ int wmain(const int argc, const wchar_t *const argv[])
         write_text(hStdErr, L"[tee] Warning: Too many input files, ignoring excess files!\n");
     }
 
-    /* Seek to the end of the file(s) */
-    if (options.append)
-    {
-        for (DWORD fileIndex = 0U; fileIndex < fileCount; ++fileIndex)
-        {
-            LARGE_INTEGER offset = { .QuadPart = 0LL };
-            if (!SetFilePointerEx(hMyFile[fileIndex], offset, NULL, FILE_END))
-            {
-                write_text(hStdErr, L"[tee] Error: Failed to move the file pointer to the end of the file!\n");
-                goto cleanup;
-            }
-        }
-    }
-
     /* Determine number of outputs */
     const DWORD outputCount = fileCount + 1U;
-
-    /* Create events */
-    if (!(hEventStop = CreateEventW(NULL, TRUE, FALSE, NULL)))
-    {
-        write_text(hStdErr, L"[tee] System error: Failed to create event object!\n\n");
-        goto cleanup;
-    }
-    for (DWORD threadId = 0U; threadId < outputCount; ++threadId)
-    {
-        if (!(hEventThrdReady[threadId] = CreateEventW(NULL, FALSE, FALSE, NULL)))
-        {
-            write_text(hStdErr, L"[tee] System error: Failed to create event object!\n\n");
-            goto cleanup;
-        }
-        if (!(hEventCompleted[threadId] = CreateEventW(NULL, FALSE, FALSE, NULL)))
-        {
-            write_text(hStdErr, L"[tee] System error: Failed to create event object!\n\n");
-            goto cleanup;
-        }
-    }
-
-    /* Set up thread data */
-    for (DWORD threadId = 0; threadId < outputCount; ++threadId)
-    {
-        threadData[threadId].hOutput = (threadId > 0U) ? hMyFile[threadId - 1U]: hStdOut;
-        threadData[threadId].hError = hStdErr;
-        threadData[threadId].flush = options.flush && (!is_terminal(threadData[threadId].hOutput));
-        threadData[threadId].hEventReady[0U] = hEventThrdReady[threadId];
-        threadData[threadId].hEventReady[1U] = hEventStop;
-        threadData[threadId].hEventCompleted = hEventCompleted[threadId];
-    }
 
     /* Start threads */
     for (DWORD threadId = 0; threadId < outputCount; ++threadId)
     {
+        threadData[threadId].hOutput = (threadId > 0U) ? hMyFile[threadId - 1U] : hStdOut;
+        threadData[threadId].hError = hStdErr;
+        threadData[threadId].flush = options.flush && (!is_terminal(threadData[threadId].hOutput));
         if (!(hThreads[threadCount++] = CreateThread(NULL, 0U, writer_thread_start_routine, (LPVOID)(DWORD_PTR)threadId, 0U, NULL)))
         {
             write_text(hStdErr, L"[tee] System error: Failed to create thread!\n");
@@ -510,21 +498,12 @@ int wmain(const int argc, const wchar_t *const argv[])
     /* Are we reading from a pipe? */
     const BOOL isPipeInput = (GetFileType(hStdIn) == FILE_TYPE_PIPE);
 
-    /* Initialize index */
-    ULONG_PTR myIndex = 1U - index;
+    /* Initialize the index */
+    DWORD myIndex = 1U;
 
     /* Process all input from STDIN stream */
     do
     {
-        for (DWORD threadId = 0U; threadId < threadCount; ++threadId)
-        {
-            if (!SetEvent(hEventThrdReady[threadId]))
-            {
-                write_text(hStdErr, L"[tee] System error: Failed to signal event!\n");
-                goto cleanup;
-            }
-        }
-
         if (!ReadFile(hStdIn, buffer[myIndex], BUFFSIZE, &bytesTotal[myIndex], NULL))
         {
             if (GetLastError() != ERROR_BROKEN_PIPE)
@@ -540,14 +519,24 @@ int wmain(const int argc, const wchar_t *const argv[])
             break;
         }
 
-        const DWORD waitResult = WaitForMultipleObjects(threadCount, hEventCompleted, TRUE, INFINITE);
-        if (!WAIT_SUCCESS(waitResult, threadCount))
+        EnterCriticalSection(&criticalSection);
+
+        while (pending > 0U)
         {
-            write_text(hStdErr, L"[tee] System error: Failed to wait for events!\n");
-            goto cleanup;
+            if (!SleepConditionVariableCS(&condAllDone, &criticalSection, INFINITE))
+            {
+                LeaveCriticalSection(&criticalSection);
+                write_text(hStdErr, L"[tee] System error: Failed to sleep on conditional variable!\n");
+                goto cleanup;
+            }
         }
 
-        myIndex = (ULONG_PTR) InterlockedExchangePointer((PVOID*)&index, (PVOID)myIndex);
+        pending = threadCount;
+        index = myIndex;
+        myIndex = 1U - myIndex;
+
+        LeaveCriticalSection(&criticalSection);
+        WakeAllConditionVariable(&condIsReady);
     }
     while ((!g_stop) || options.ignore);
 
@@ -556,17 +545,17 @@ int wmain(const int argc, const wchar_t *const argv[])
 cleanup:
 
     /* Stop the worker threads */
-    if (hEventStop)
-    {
-        SetEvent(hEventStop);
-    }
+    EnterCriticalSection(&criticalSection);
+    index = MAXDWORD;
+    LeaveCriticalSection(&criticalSection);
+    WakeAllConditionVariable(&condIsReady);
 
     /* Wait for worker threads to exit */
     const DWORD pendingThreads = count_handles(hThreads, ARRAYSIZE(hThreads));
     if (pendingThreads > 0U)
     {
-        const DWORD waitResult = WaitForMultipleObjects(pendingThreads, hThreads, TRUE, 10000U);
-        if (!WAIT_SUCCESS(waitResult, pendingThreads))
+        const DWORD result = WaitForMultipleObjects(pendingThreads, hThreads, TRUE, 10000U);
+        if (!((result >= WAIT_OBJECT_0) && (result < WAIT_OBJECT_0 + pendingThreads)))
         {
             for (DWORD threadId = 0U; threadId < pendingThreads; ++threadId)
             {
@@ -597,19 +586,14 @@ cleanup:
         CLOSE_HANDLE(hThreads[threadId]);
     }
 
-    /* Close events */
-    for (DWORD threadId = 0U; threadId < ARRAYSIZE(hEventThrdReady); ++threadId)
-    {
-        CLOSE_HANDLE(hEventThrdReady[threadId]);
-        CLOSE_HANDLE(hEventCompleted[threadId]);
-    }
-    CLOSE_HANDLE(hEventStop);
-
     /* Close the output file(s) */
     for (size_t fileIndex = 0U; fileIndex < ARRAYSIZE(hMyFile); ++fileIndex)
     {
         CLOSE_HANDLE(hMyFile[fileIndex]);
     }
+
+    /* Delete critical section */
+    DeleteCriticalSection(&criticalSection);
 
     /* Exit */
     return exitCode;

@@ -7,8 +7,8 @@
 #undef APSTUDIO_READONLY_SYMBOLS
 
 #define MY_VERSION_MAJOR 1
-#define MY_VERSION_MINOR 1
-#define MY_VERSION_PATCH 4
+#define MY_VERSION_MINOR 2
+#define MY_VERSION_PATCH 0
 
 #define MY_VERSION_NUMBER MY_VERSION_MAJOR, MY_VERSION_MINOR, MY_VERSION_PATCH, 0
 #define ___MY_VERSION_STRING(X) #X
@@ -34,6 +34,12 @@
 LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
 #pragma code_page(1252)
 #endif //_WIN32
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Icon
+//
+101 ICON "tee.ico"
 
 /////////////////////////////////////////////////////////////////////////////
 //
