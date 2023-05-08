@@ -314,7 +314,7 @@ static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 
 typedef struct
 {
-    BOOL append, flush, ignore, help, version;
+    BOOL append, flush, ignore, delay, help, version;
 }
 options_t;
 
@@ -335,6 +335,7 @@ static BOOL parse_option(options_t *const options, const wchar_t c, const wchar_
     PARSE_OPTION('a', append);
     PARSE_OPTION('f', flush);
     PARSE_OPTION('i', ignore);
+    PARSE_OPTION('d', delay);
     PARSE_OPTION('h', help);
     PARSE_OPTION('v', version);
 
@@ -427,7 +428,8 @@ int wmain(const int argc, const wchar_t *const argv[])
             L"Options:\n"
             L"  -a --append  Append to the existing file, instead of truncating\n"
             L"  -f --flush   Flush output file after each write operation\n"
-            L"  -i --ignore  Ignore the interrupt signal (SIGINT), e.g. CTRL+C\n\n");
+            L"  -i --ignore  Ignore the interrupt signal (SIGINT), e.g. CTRL+C\n"
+            L"  -d --delay   Add a small delay after each read operation\n\n");
         return 0;
     }
 
@@ -439,7 +441,7 @@ int wmain(const int argc, const wchar_t *const argv[])
     }
 
     /* Initialize critical section */
-    if (!InitializeCriticalSectionAndSpinCount(&criticalSection, 4096U))
+    if (!InitializeCriticalSectionAndSpinCount(&criticalSection, 4000U))
     {
         write_text(hStdErr, L"[tee] System error: Failed to initialize critical section!\n");
         return 1;
@@ -537,6 +539,11 @@ int wmain(const int argc, const wchar_t *const argv[])
 
         LeaveCriticalSection(&criticalSection);
         WakeAllConditionVariable(&condIsReady);
+
+        if (options.delay)
+        {
+            Sleep(1U);
+        }
     }
     while ((!g_stop) || options.ignore);
 
