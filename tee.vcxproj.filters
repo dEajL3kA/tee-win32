@@ -30,7 +30,10 @@
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="etc\resources\version.h">
+    <ClInclude Include="include\cpu.h">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="include\version.h">
       <Filter>Headerdateien</Filter>
     </ClInclude>
   </ItemGroup>

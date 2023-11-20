@@ -2,28 +2,18 @@
 //
 // Microsoft Visual C++ generated resource script.
 //
-#define _INCLUDE_VERSION_H 1
-#include "version.h"
+#include <version.h>
+#include <cpu.h>
 
 #define APSTUDIO_READONLY_SYMBOLS
-#include "WinResrc.h"
+#include <WinResrc.h>
 #undef APSTUDIO_READONLY_SYMBOLS
 
-#define MY_VERSION_NUMBER MY_VERSION_MAJOR, MY_VERSION_MINOR, MY_VERSION_PATCH, 0
+#define MY_VERSION_NUMBER VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, 0
 #define ___MY_VERSION_STRING(X) #X
 #define __MY_VERSION_STRING(X,Y,Z) ___MY_VERSION_STRING(X.Y.Z)
 #define _MY_VERSION_STRING(X,Y,Z) __MY_VERSION_STRING(X,Y,Z)
-#define MY_VERSION_STRING _MY_VERSION_STRING(MY_VERSION_MAJOR, MY_VERSION_MINOR, MY_VERSION_PATCH)
-
-#ifdef _M_ARM64
-#define MY_ARCH_SUFFIX "(a64)"
-#else
-#ifdef _M_X64
-#define MY_ARCH_SUFFIX "(x64)"
-#else
-#define MY_ARCH_SUFFIX "(x86)"
-#endif
-#endif
+#define MY_VERSION_STRING _MY_VERSION_STRING(VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH)
 
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -62,7 +52,7 @@ BEGIN
         BLOCK "000004b0"
         BEGIN
             VALUE "ProductName",      "tee for Windows"
-            VALUE "FileDescription",  "tee for Windows " MY_ARCH_SUFFIX
+            VALUE "FileDescription",  "tee for Windows (" PROCESSOR_ARCHITECTURE ")"
             VALUE "ProductVersion",   MY_VERSION_STRING
             VALUE "FileVersion",      MY_VERSION_STRING
             VALUE "InternalName",     "tee-win32"

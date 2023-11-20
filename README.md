@@ -22,15 +22,30 @@ Options:
   -d --delay   Add a small delay after each read operation
 ```
 
+### Terminal output
+
+Tee can be used as an intermediate buffer (i.e. *without* writing to a file) to greatly speed-up terminal output:
+```
+gizmo.exe [...] | tee.exe NUL
+```
+
 ## Implementation
 
 This is a "native" implementation of the **`tee`** command that builds directly on top of the Win32 API.
 
-It uses multi-threaded processing and double buffering for maximum throughput.
+It uses multi-threaded I/O and triple buffering for maximum throughput.
 
 ## System Requirements
 
 This application requires Windows Vista or later. All 32-Bit and 64-Bit editions, including ARM64, are supported.
+
+## Website
+
+Git mirrors for this project:
+
+* <https://github.com/dEajL3kA/tee-win32>
+* <https://gitlab.com/deajl3ka1/tee-for-windows>
+* <https://repo.or.cz/tee-win32.git>
 
 ## License
 

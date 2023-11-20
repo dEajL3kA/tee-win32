@@ -19,13 +19,31 @@
 #include <Windows.h>
 #include <ShellAPI.h>
 #include <stdarg.h>
+#include "cpu.h"
 
-#define BUFFSIZE 8192U
+#define BUFF_SIZE 6144U
+#define BUFFERS 3U
 #define MAX_THREADS MAXIMUM_WAIT_OBJECTS
 
- // --------------------------------------------------------------------------
- // Utilities
- // --------------------------------------------------------------------------
+// --------------------------------------------------------------------------
+// Assertions
+// --------------------------------------------------------------------------
+
+#ifndef NDEBUG
+#define ASSERT(CONDIATION, HANDLE_OUT, MESSAGE) do { \
+    static const wchar_t *const _message = L"[tee] Assertion Failed: " MESSAGE L"\n"; \
+    if (!(CONDIATION)) { \
+        write_text((HANDLE_OUT), _message); \
+        FatalExit(-1); \
+    } \
+} while(0)
+#else
+#define ASSERT(CONDIATION, HANDLE_OUT, MESSAGE) ((void)0)
+#endif
+
+// --------------------------------------------------------------------------
+// Utilities
+// --------------------------------------------------------------------------
 
 static wchar_t to_lower(const wchar_t c)
 {
@@ -206,7 +224,7 @@ static wchar_t *get_version_string(void)
     version_t version;
     if (get_version_info(&version))
     {
-        return format_string(L"tee for Windows v%1!u!.%2!u!.%3!u! [%4!s!]\n", version.major, version.minor, version.patch, TEXT(__DATE__));
+        return format_string(L"tee for Windows v%1!u!.%2!u!.%3!u! [%4!s!] [%5!s!]\n", version.major, version.minor, version.patch, PROCESSOR_ARCHITECTURE, TEXT(__DATE__));
     }
 
     return NULL;
@@ -273,7 +291,9 @@ while (0)
 // Writer thread
 // --------------------------------------------------------------------------
 
-typedef struct
+#define INCREMENT_INDEX(INDEX, FLAG) do { if (++(INDEX) >= BUFFERS) { (INDEX) = 0U; if (++(FLAG) > 2U) { (FLAG) = 1U; } } } while (0)
+
+typedef struct _thread
 {
     HANDLE hOutput, hError;
     BOOL flush;
@@ -281,21 +301,23 @@ typedef struct
 thread_t;
 
 static thread_t g_threadData[MAX_THREADS];
-static BYTE g_buffer[2U][BUFFSIZE];
-static DWORD g_bytesTotal[2U] = { 0U, 0U }, g_pending = 0U, g_index = 0U;
+static BYTE g_buffer[BUFFERS][BUFF_SIZE], g_state[BUFF_SIZE] = { 0U, 0U, 0U };
+static DWORD g_bytesTotal[BUFF_SIZE] = { 0U, 0U, 0U }, g_pending[BUFF_SIZE] = { 0U, 0U, 0U };
 static CRITICAL_SECTION g_criticalSection;
 static CONDITION_VARIABLE g_condIsReady, g_condAllDone;
 
 static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 {
-    DWORD bytesWritten, myIndex = 0U;
+    DWORD bytesWritten = 0U, myIndex = 0U;
+    BYTE myFlag = 1U;
+    BOOL writeErrors = FALSE;
     const thread_t *const param = &g_threadData[(DWORD_PTR)lpThreadParameter];
 
     EnterCriticalSection(&g_criticalSection);
 
     for (;;)
     {
-        while (g_index == myIndex)
+        while (!(g_state[myIndex] & myFlag))
         {
             if (!SleepConditionVariableCS(&g_condIsReady, &g_criticalSection, INFINITE))
             {
@@ -305,30 +327,38 @@ static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
             }
         }
 
-        myIndex = g_index;
-        LeaveCriticalSection(&g_criticalSection);
-
-        if (myIndex == MAXDWORD)
+        if (g_state[myIndex] > 2U)
         {
+            LeaveCriticalSection(&g_criticalSection);
+            if (writeErrors)
+            {
+                write_text(param->hError, L"[tee] Error: Not all data could be written!\n");
+            }
             return 0U;
         }
+
+        LeaveCriticalSection(&g_criticalSection);
 
         for (DWORD offset = 0U; offset < g_bytesTotal[myIndex]; offset += bytesWritten)
         {
             const BOOL result = WriteFile(param->hOutput, g_buffer[myIndex] + offset, g_bytesTotal[myIndex] - offset, &bytesWritten, NULL);
             if ((!result) || (!bytesWritten))
             {
-                write_text(param->hError, L"[tee] Error: Not all data could be written!\n");
+                writeErrors = TRUE;
                 break;
             }
         }
 
         EnterCriticalSection(&g_criticalSection);
 
-        if (!(--g_pending))
+        ASSERT(g_pending > 0U, param->hError, L"Pending counter must be a positive value!");
+
+        if (!(--g_pending[myIndex]))
         {
             WakeConditionVariable(&g_condAllDone);
         }
+
+        INCREMENT_INDEX(myIndex, myFlag);
 
         if (param->flush)
         {
@@ -345,7 +375,7 @@ static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 
 typedef struct
 {
-    BOOL append, flush, ignore, delay, help, version;
+    BOOL append, delay, flush, help, ignore, version;
 }
 options_t;
 
@@ -364,10 +394,10 @@ static BOOL parse_option(options_t *const options, const wchar_t c, const wchar_
     const wchar_t lc = to_lower(c);
 
     PARSE_OPTION('a', append);
-    PARSE_OPTION('f', flush);
-    PARSE_OPTION('i', ignore);
     PARSE_OPTION('d', delay);
+    PARSE_OPTION('f', flush);
     PARSE_OPTION('h', help);
+    PARSE_OPTION('i', ignore);
     PARSE_OPTION('v', version);
 
     return FALSE;
@@ -405,7 +435,7 @@ int wmain(const int argc, const wchar_t *const argv[])
 {
     HANDLE hThreads[MAX_THREADS], hMyFiles[MAX_THREADS - 1U];
     int exitCode = 1, argOff = 1;
-    DWORD fileCount = 0U, threadCount = 0U;
+    DWORD fileCount = 0U, threadCount = 0U, myIndex = 0U;
     options_t options;
 
     /* Initialize local variables */
@@ -443,7 +473,7 @@ int wmain(const int argc, const wchar_t *const argv[])
     if (options.help || options.version)
     {
         wchar_t *const versionString = get_version_string();
-        write_text(hStdErr, versionString ? versionString : L"tee for Windows.\n");
+        write_text(hStdErr, versionString ? versionString : L"tee for Windows [N/A]\n");
         if (options.help)
         {
             write_text(hStdErr, L"\n"
@@ -531,29 +561,16 @@ int wmain(const int argc, const wchar_t *const argv[])
     const BOOL isPipeInput = (GetFileType(hStdIn) == FILE_TYPE_PIPE);
 
     /* Initialize the index */
-    DWORD myIndex = 1U;
+    BYTE myFlag = 1U;
 
     /* Process all input from STDIN stream */
     do
     {
-        if (!ReadFile(hStdIn, g_buffer[myIndex], BUFFSIZE, &g_bytesTotal[myIndex], NULL))
-        {
-            if (GetLastError() != ERROR_BROKEN_PIPE)
-            {
-                write_text(hStdErr, L"[tee] Error: Failed to read input data!\n");
-                goto cleanup;
-            }
-            break;
-        }
-
-        if ((!g_bytesTotal[myIndex]) && (!isPipeInput)) /*pipes may return zero bytes, even when more data can become available later!*/
-        {
-            break;
-        }
-
         EnterCriticalSection(&g_criticalSection);
 
-        while (g_pending > 0U)
+        ASSERT(myIndex < BUFFERS, hStdErr, L"Buffer index is out of range!");
+
+        while (g_pending[myIndex])
         {
             if (!SleepConditionVariableCS(&g_condAllDone, &g_criticalSection, INFINITE))
             {
@@ -563,9 +580,32 @@ int wmain(const int argc, const wchar_t *const argv[])
             }
         }
 
-        g_pending = threadCount;
-        g_index = myIndex;
-        myIndex = 1U - myIndex;
+        LeaveCriticalSection(&g_criticalSection);
+
+        if (!ReadFile(hStdIn, g_buffer[myIndex], BUFF_SIZE, &g_bytesTotal[myIndex], NULL))
+        {
+            if (GetLastError() != ERROR_BROKEN_PIPE)
+            {
+                write_text(hStdErr, L"[tee] Error: Failed to read input data!\n");
+                goto cleanup;
+            }
+            break;
+        }
+
+        if (!g_bytesTotal[myIndex])
+        {
+            if (isPipeInput)
+            {
+                continue; /*pipes may return zero bytes, even when more data can become available later!*/
+            }
+            break;
+        }
+
+        EnterCriticalSection(&g_criticalSection);
+
+        g_pending[myIndex] = threadCount;
+        g_state[myIndex] = myFlag;
+        INCREMENT_INDEX(myIndex, myFlag);
 
         LeaveCriticalSection(&g_criticalSection);
         WakeAllConditionVariable(&g_condIsReady);
@@ -583,7 +623,8 @@ cleanup:
 
     /* Stop the worker threads */
     EnterCriticalSection(&g_criticalSection);
-    g_index = MAXDWORD;
+    g_state[myIndex] = 3U;
+    g_pending[myIndex] = MAX_THREADS;
     LeaveCriticalSection(&g_criticalSection);
     WakeAllConditionVariable(&g_condIsReady);
 
@@ -596,7 +637,7 @@ cleanup:
         {
             for (DWORD threadId = 0U; threadId < pendingThreads; ++threadId)
             {
-                if (WaitForSingleObject(hThreads[threadId], 16U) != WAIT_OBJECT_0)
+                if (WaitForSingleObject(hThreads[threadId], 125U) != WAIT_OBJECT_0)
                 {
                     write_text(hStdErr, L"[tee] Error: Worker thread did not exit cleanly!\n");
                     TerminateThread(hThreads[threadId], 1U);
