@@ -90,7 +90,7 @@ static const wchar_t *get_filename(const wchar_t *filePath)
 static BOOL is_null_device(const wchar_t *filePath)
 {
     filePath = get_filename(filePath);
-    if ((to_lower(filePath[0U]) == L'n') && (to_lower(filePath[1U]) == L'u') || (to_lower(filePath[2U]) == L'l'))
+    if ((to_lower(filePath[0U]) == L'n') && (to_lower(filePath[1U]) == L'u') && (to_lower(filePath[2U]) == L'l'))
     {
         return ((filePath[3U] == L'\0') || (filePath[3U] == L'.'));
     }
@@ -398,7 +398,10 @@ int wmain(const int argc, const wchar_t *const argv[])
     const HANDLE hStdIn = GetStdHandle(STD_INPUT_HANDLE), hStdOut = GetStdHandle(STD_OUTPUT_HANDLE), hStdErr = GetStdHandle(STD_ERROR_HANDLE);
     if (!(VALID_HANDLE(hStdIn) && VALID_HANDLE(hStdOut) && VALID_HANDLE(hStdErr)))
     {
-        OutputDebugStringA("[tee-win32] System error: Failed to initialize standard handles!\n");
+        if (VALID_HANDLE(hStdErr))
+        {
+            write_text(hStdErr, L"[tee] System error: Failed to initialize standard I/O handles!\n");
+        }
         return -1;
     }
 
@@ -459,6 +462,27 @@ int wmain(const int argc, const wchar_t *const argv[])
         return 1;
     }
 
+    /* Determine input type */
+    const DWORD inputType = GetFileType(hStdIn);
+    if (inputType == FILE_TYPE_UNKNOWN)
+    {
+        if (GetLastError() != NO_ERROR)
+        {
+            write_text(hStdErr, L"[tee] System error: Failed to initialize standard input stream!\n");
+            return -1;
+        }
+    }
+
+    /* Validate output stream */
+    if (GetFileType(hStdOut) == FILE_TYPE_UNKNOWN)
+    {
+        if (GetLastError() != NO_ERROR)
+        {
+            write_text(hStdErr, L"[tee] System error: Failed to initialize standard output stream!\n");
+            return -1;
+        }
+    }
+
     /* Open output file(s) */
     while ((argOff < argc) && (fileCount < ARRAYSIZE(hMyFiles)))
     {
@@ -505,9 +529,6 @@ int wmain(const int argc, const wchar_t *const argv[])
         }
     }
 
-    /* Are we reading from a pipe? */
-    const BOOL isPipeInput = (GetFileType(hStdIn) == FILE_TYPE_PIPE);
-
     /* Initialize the index */
     BYTE myFlag = 1U;
 
@@ -543,7 +564,7 @@ int wmain(const int argc, const wchar_t *const argv[])
         if (!g_bytesTotal[myIndex])
         {
             ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
-            if (isPipeInput)
+            if (inputType == FILE_TYPE_PIPE)
             {
                 continue; /*pipes may return zero bytes, even when more data can become available later!*/
             }
