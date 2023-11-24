@@ -20,10 +20,13 @@
 
 #if defined(_M_ARM64)
 #define PROCESSOR_ARCHITECTURE L"ARM64"
+#define PROCESSOR_BITNESS 64U
 #elif defined(_M_X64)
 #define PROCESSOR_ARCHITECTURE L"AMD64"
+#define PROCESSOR_BITNESS 64U
 #elif defined(_M_IX86)
 #define PROCESSOR_ARCHITECTURE L"x86"
+#define PROCESSOR_BITNESS 32U
 #else
 #error Unsupported processor architecture!
 #endif

@@ -20,8 +20,9 @@
 #include <ShellAPI.h>
 #include <stdarg.h>
 #include "cpu.h"
+#include "version.h"
 
-#define BUFF_SIZE 6144U
+#define BUFF_SIZE (PROCESSOR_BITNESS * 128U)
 #define BUFFERS 3U
 #define MAX_THREADS MAXIMUM_WAIT_OBJECTS
 
@@ -174,60 +175,6 @@ static BOOL WINAPI console_handler(const DWORD ctrlType)
     default:
         return FALSE;
     }
-}
-
-// --------------------------------------------------------------------------
-// Version
-// --------------------------------------------------------------------------
-
-typedef struct
-{
-    WORD major, minor, patch, build;
-}
-version_t;
-
-static BOOL get_version_info(version_t *const versionInfo)
-{
-    const HRSRC hVersion = FindResourceW(NULL, MAKEINTRESOURCE(VS_VERSION_INFO), RT_VERSION);
-    if (hVersion)
-    {
-        const HGLOBAL hResource = LoadResource(NULL, hVersion);
-        if (hResource)
-        {
-            const DWORD sizeOfResource = SizeofResource(NULL, hResource);
-            if (sizeOfResource >= sizeof(VS_FIXEDFILEINFO))
-            {
-                const PVOID addrResourceBlock = LockResource(hResource);
-                if (addrResourceBlock)
-                {
-                    VS_FIXEDFILEINFO *fileInfoData;
-                    UINT fileInfoSize;
-                    if (VerQueryValueW(addrResourceBlock, L"\\", &fileInfoData, &fileInfoSize))
-                    {
-                        versionInfo->major = HIWORD(fileInfoData->dwFileVersionMS);
-                        versionInfo->minor = LOWORD(fileInfoData->dwFileVersionMS);
-                        versionInfo->patch = HIWORD(fileInfoData->dwFileVersionLS);
-                        versionInfo->build = LOWORD(fileInfoData->dwFileVersionLS);
-                        return TRUE;
-                    }
-                }
-            }
-        }
-    }
-
-    versionInfo->major = versionInfo->minor = versionInfo->patch = versionInfo->build = 0U;
-    return FALSE;
-}
-
-static wchar_t *get_version_string(void)
-{
-    version_t version;
-    if (get_version_info(&version))
-    {
-        return format_string(L"tee for Windows v%1!u!.%2!u!.%3!u! [%4!s!] [%5!s!]\n", version.major, version.minor, version.patch, PROCESSOR_ARCHITECTURE, TEXT(__DATE__));
-    }
-
-    return NULL;
 }
 
 // --------------------------------------------------------------------------
@@ -472,8 +419,8 @@ int wmain(const int argc, const wchar_t *const argv[])
     /* Print manual page */
     if (options.help || options.version)
     {
-        wchar_t *const versionString = get_version_string();
-        write_text(hStdErr, versionString ? versionString : L"tee for Windows [N/A]\n");
+        wchar_t *const versionString = format_string(L"tee for Windows v%1!u!.%2!u!.%3!u! [%4!s!] [%5!s!]\n", APP_VERSION_MAJOR, APP_VERSION_MINOR, APP_VERSION_PATCH, PROCESSOR_ARCHITECTURE, TEXT(__DATE__));
+        write_text(hStdErr, versionString ? versionString : L"tee for Windows\n");
         if (options.help)
         {
             write_text(hStdErr, L"\n"
