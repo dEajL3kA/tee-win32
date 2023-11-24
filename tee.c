@@ -18,9 +18,12 @@
 #define WIN32_LEAN_AND_MEAN 1
 #include <Windows.h>
 #include <ShellAPI.h>
+#include <intrin.h>
 #include <stdarg.h>
-#include "cpu.h"
-#include "version.h"
+#include "include/cpu.h"
+#include "include/version.h"
+
+#pragma intrinsic(_InterlockedCompareExchange, _InterlockedDecrement)
 
 #define BUFF_SIZE (PROCESSOR_BITNESS * 128U)
 #define BUFFERS 3U
@@ -249,42 +252,43 @@ thread_t;
 
 static thread_t g_threadData[MAX_THREADS];
 static BYTE g_buffer[BUFFERS][BUFF_SIZE], g_state[BUFF_SIZE] = { 0U, 0U, 0U };
-static DWORD g_bytesTotal[BUFF_SIZE] = { 0U, 0U, 0U }, g_pending[BUFF_SIZE] = { 0U, 0U, 0U };
-static CRITICAL_SECTION g_criticalSection;
-static CONDITION_VARIABLE g_condIsReady, g_condAllDone;
+static DWORD g_bytesTotal[BUFF_SIZE] = { 0U, 0U, 0U };
+static volatile LONG g_pending[BUFF_SIZE] = { 0L, 0L, 0L };
+static SRWLOCK g_rwLocks[BUFFERS];
+static CONDITION_VARIABLE g_condIsReady[BUFFERS], g_condAllDone[BUFFERS];
 
 static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 {
-    DWORD bytesWritten = 0U, myIndex = 0U;
+    DWORD bytesWritten = 0U, myIndex = 0U, pendingThreads = 0U;
     BYTE myFlag = 1U;
     BOOL writeErrors = FALSE;
     const thread_t *const param = &g_threadData[(DWORD_PTR)lpThreadParameter];
 
-    EnterCriticalSection(&g_criticalSection);
-
     for (;;)
     {
+        ASSERT(myIndex < BUFFERS, param->hError, L"Current buffer index is out of range!");
+
+        AcquireSRWLockShared(&g_rwLocks[myIndex]);
+
         while (!(g_state[myIndex] & myFlag))
         {
-            if (!SleepConditionVariableCS(&g_condIsReady, &g_criticalSection, INFINITE))
+            if (!SleepConditionVariableSRW(&g_condIsReady[myIndex], &g_rwLocks[myIndex], INFINITE, CONDITION_VARIABLE_LOCKMODE_SHARED))
             {
-                LeaveCriticalSection(&g_criticalSection);
-                write_text(param->hError, L"[tee] System error: Failed to sleep on conditional variable!\n");
+                ReleaseSRWLockShared(&g_rwLocks[myIndex]);
+                write_text(param->hError, L"[tee] System error: Failed to sleep on the conditional variable!\n");
                 return 1U;
             }
         }
 
         if (g_state[myIndex] > 2U)
         {
-            LeaveCriticalSection(&g_criticalSection);
+            ReleaseSRWLockShared(&g_rwLocks[myIndex]);
             if (writeErrors)
             {
                 write_text(param->hError, L"[tee] Error: Not all data could be written!\n");
             }
             return 0U;
         }
-
-        LeaveCriticalSection(&g_criticalSection);
 
         for (DWORD offset = 0U; offset < g_bytesTotal[myIndex]; offset += bytesWritten)
         {
@@ -296,22 +300,22 @@ static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
             }
         }
 
-        EnterCriticalSection(&g_criticalSection);
+        ASSERT(g_pending > 0U, param->hError, L"Pending threads counter must be a positive value!");
 
-        ASSERT(g_pending > 0U, param->hError, L"Pending counter must be a positive value!");
+        pendingThreads = _InterlockedDecrement(&g_pending[myIndex]);
 
-        if (!(--g_pending[myIndex]))
+        ReleaseSRWLockShared(&g_rwLocks[myIndex]);
+
+        if (!pendingThreads)
         {
-            WakeConditionVariable(&g_condAllDone);
+            WakeConditionVariable(&g_condAllDone[myIndex]);
         }
 
         INCREMENT_INDEX(myIndex, myFlag);
 
         if (param->flush)
         {
-            LeaveCriticalSection(&g_criticalSection);
             FlushFileBuffers(param->hOutput);
-            EnterCriticalSection(&g_criticalSection);
         }
     }
 }
@@ -398,6 +402,14 @@ int wmain(const int argc, const wchar_t *const argv[])
         return -1;
     }
 
+    /* Initialize read/write locks and condition variables */
+    for (DWORD index = 0; index < BUFFERS; ++index)
+    {
+        InitializeSRWLock(&g_rwLocks[index]);
+        InitializeConditionVariable(&g_condIsReady[index]);
+        InitializeConditionVariable(&g_condAllDone[index]);
+    }
+
     /* Set up CRTL+C handler */
     SetConsoleCtrlHandler(console_handler, TRUE);
 
@@ -446,17 +458,6 @@ int wmain(const int argc, const wchar_t *const argv[])
         write_text(hStdErr, L"[tee] Error: Output file name is missing. Type \"tee --help\" for details!\n");
         return 1;
     }
-
-    /* Initialize critical section */
-    if (!InitializeCriticalSectionAndSpinCount(&g_criticalSection, 4000U))
-    {
-        write_text(hStdErr, L"[tee] System error: Failed to initialize critical section!\n");
-        return 1;
-    }
-
-    /* Initialize cond variables */
-    InitializeConditionVariable(&g_condIsReady);
-    InitializeConditionVariable(&g_condAllDone);
 
     /* Open output file(s) */
     while ((argOff < argc) && (fileCount < ARRAYSIZE(hMyFiles)))
@@ -513,25 +514,25 @@ int wmain(const int argc, const wchar_t *const argv[])
     /* Process all input from STDIN stream */
     do
     {
-        EnterCriticalSection(&g_criticalSection);
+        ASSERT(myIndex < BUFFERS, hStdErr, L"Current buffer index is out of range!");
 
-        ASSERT(myIndex < BUFFERS, hStdErr, L"Buffer index is out of range!");
+        AcquireSRWLockExclusive(&g_rwLocks[myIndex]);
 
-        while (g_pending[myIndex])
+        while (_InterlockedCompareExchange(&g_pending[myIndex], threadCount, 0L))
         {
-            if (!SleepConditionVariableCS(&g_condAllDone, &g_criticalSection, INFINITE))
+            if (!SleepConditionVariableSRW(&g_condAllDone[myIndex], &g_rwLocks[myIndex], INFINITE, 0U))
             {
-                LeaveCriticalSection(&g_criticalSection);
-                write_text(hStdErr, L"[tee] System error: Failed to sleep on conditional variable!\n");
+                ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
+                write_text(hStdErr, L"[tee] System error: Failed to sleep on the conditional variable!\n");
                 goto cleanup;
             }
         }
 
-        LeaveCriticalSection(&g_criticalSection);
-
         if (!ReadFile(hStdIn, g_buffer[myIndex], BUFF_SIZE, &g_bytesTotal[myIndex], NULL))
         {
-            if (GetLastError() != ERROR_BROKEN_PIPE)
+            const DWORD error = GetLastError();
+            ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
+            if (error != ERROR_BROKEN_PIPE)
             {
                 write_text(hStdErr, L"[tee] Error: Failed to read input data!\n");
                 goto cleanup;
@@ -541,6 +542,7 @@ int wmain(const int argc, const wchar_t *const argv[])
 
         if (!g_bytesTotal[myIndex])
         {
+            ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
             if (isPipeInput)
             {
                 continue; /*pipes may return zero bytes, even when more data can become available later!*/
@@ -548,14 +550,12 @@ int wmain(const int argc, const wchar_t *const argv[])
             break;
         }
 
-        EnterCriticalSection(&g_criticalSection);
-
-        g_pending[myIndex] = threadCount;
         g_state[myIndex] = myFlag;
-        INCREMENT_INDEX(myIndex, myFlag);
 
-        LeaveCriticalSection(&g_criticalSection);
-        WakeAllConditionVariable(&g_condIsReady);
+        ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
+        WakeAllConditionVariable(&g_condIsReady[myIndex]);
+
+        INCREMENT_INDEX(myIndex, myFlag);
 
         if (options.delay)
         {
@@ -569,11 +569,11 @@ int wmain(const int argc, const wchar_t *const argv[])
 cleanup:
 
     /* Stop the worker threads */
-    EnterCriticalSection(&g_criticalSection);
-    g_state[myIndex] = 3U;
+    AcquireSRWLockExclusive(&g_rwLocks[myIndex]);
+    g_state[myIndex] = MAXBYTE;
     g_pending[myIndex] = MAX_THREADS;
-    LeaveCriticalSection(&g_criticalSection);
-    WakeAllConditionVariable(&g_condIsReady);
+    ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
+    WakeAllConditionVariable(&g_condIsReady[myIndex]);
 
     /* Wait for worker threads to exit */
     const DWORD pendingThreads = count_handles(hThreads, ARRAYSIZE(hThreads));
@@ -616,9 +616,6 @@ cleanup:
     {
         CLOSE_HANDLE(hMyFiles[fileIndex]);
     }
-
-    /* Delete critical section */
-    DeleteCriticalSection(&g_criticalSection);
 
     /* Exit */
     return exitCode;
