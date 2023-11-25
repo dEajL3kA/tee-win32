@@ -23,9 +23,9 @@
 #include "include/cpu.h"
 #include "include/version.h"
 
-#pragma intrinsic(_InterlockedCompareExchange, _InterlockedDecrement)
+#pragma intrinsic(_InterlockedIncrement, _InterlockedDecrement)
 
-#define BUFF_SIZE (PROCESSOR_BITNESS * 128U)
+#define BUFFER_SIZE (PROCESSOR_BITNESS * 128U)
 #define BUFFERS 3U
 #define MAX_THREADS MAXIMUM_WAIT_OBJECTS
 
@@ -48,6 +48,9 @@
 // --------------------------------------------------------------------------
 // Utilities
 // --------------------------------------------------------------------------
+
+#define POS_LONG(X) ((LONG)((X) & MAXLONG))
+#define NEG_LONG(X) (-POS_LONG(X))
 
 static wchar_t to_lower(const wchar_t c)
 {
@@ -241,7 +244,7 @@ while (0)
 // Writer thread
 // --------------------------------------------------------------------------
 
-#define INCREMENT_INDEX(INDEX, FLAG) do { if (++(INDEX) >= BUFFERS) { (INDEX) = 0U; if (++(FLAG) > 2U) { (FLAG) = 1U; } } } while (0)
+#define INCREMENT_INDEX(INDEX, FLAG) do { if (++(INDEX) >= BUFFERS) { (INDEX) = 0U; (FLAG) = (!(FLAG)); } } while (0)
 
 typedef struct _thread
 {
@@ -250,19 +253,18 @@ typedef struct _thread
 }
 thread_t;
 
-static thread_t g_threadData[MAX_THREADS];
-static BYTE g_buffer[BUFFERS][BUFF_SIZE], g_state[BUFF_SIZE] = { 0U, 0U, 0U };
-static DWORD g_bytesTotal[BUFF_SIZE] = { 0U, 0U, 0U };
-static volatile LONG g_pending[BUFF_SIZE] = { 0L, 0L, 0L };
+static BYTE g_buffer[BUFFERS][BUFFER_SIZE];
+static DWORD g_bytesTotal[BUFFERS] = { 0U, 0U, 0U };
+static volatile LONG g_pending[BUFFERS] = { 0L, 0L, 0L };
 static SRWLOCK g_rwLocks[BUFFERS];
 static CONDITION_VARIABLE g_condIsReady[BUFFERS], g_condAllDone[BUFFERS];
 
 static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 {
-    DWORD bytesWritten = 0U, myIndex = 0U, pendingThreads = 0U;
-    BYTE myFlag = 1U;
-    BOOL writeErrors = FALSE;
-    const thread_t *const param = &g_threadData[(DWORD_PTR)lpThreadParameter];
+    DWORD bytesWritten = 0U, myIndex = 0U;
+    LONG pending = 0L;
+    BOOL myFlag = TRUE, writeErrors = FALSE;
+    const thread_t *const param = (const thread_t*)lpThreadParameter;
 
     for (;;)
     {
@@ -270,27 +272,31 @@ static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 
         AcquireSRWLockShared(&g_rwLocks[myIndex]);
 
-        while (!(g_state[myIndex] & myFlag))
+        pending = g_pending[myIndex];
+
+        while (!(myFlag ? (pending > 0L) : (pending < 0L)))
         {
             if (!SleepConditionVariableSRW(&g_condIsReady[myIndex], &g_rwLocks[myIndex], INFINITE, CONDITION_VARIABLE_LOCKMODE_SHARED))
             {
                 ReleaseSRWLockShared(&g_rwLocks[myIndex]);
-                write_text(param->hError, L"[tee] System error: Failed to sleep on the conditional variable!\n");
-                return 1U;
+                write_text(param->hError, L"[tee] Operating system error: SleepConditionVariableSRW() has failed!\n");
+                TerminateProcess(GetCurrentProcess(), 1U);
             }
+            pending = g_pending[myIndex];
         }
 
-        if (g_state[myIndex] > 2U)
+        const DWORD bytesTotal = g_bytesTotal[myIndex];
+        if (bytesTotal == MAXDWORD)
         {
             ReleaseSRWLockShared(&g_rwLocks[myIndex]);
             if (writeErrors)
             {
-                write_text(param->hError, L"[tee] Error: Not all data could be written!\n");
+                write_text(param->hError, L"[tee] I/O error: Not all data could be written!\n");
             }
             return 0U;
         }
 
-        for (DWORD offset = 0U; offset < g_bytesTotal[myIndex]; offset += bytesWritten)
+        for (DWORD offset = 0U; offset < bytesTotal; offset += bytesWritten)
         {
             const BOOL result = WriteFile(param->hOutput, g_buffer[myIndex] + offset, g_bytesTotal[myIndex] - offset, &bytesWritten, NULL);
             if ((!result) || (!bytesWritten))
@@ -302,11 +308,11 @@ static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 
         ASSERT(g_pending > 0U, param->hError, L"Pending threads counter must be a positive value!");
 
-        pendingThreads = _InterlockedDecrement(&g_pending[myIndex]);
+        pending = myFlag ? _InterlockedDecrement(&g_pending[myIndex]) : _InterlockedIncrement(&g_pending[myIndex]);
 
         ReleaseSRWLockShared(&g_rwLocks[myIndex]);
 
-        if (!pendingThreads)
+        if (!pending)
         {
             WakeConditionVariable(&g_condAllDone[myIndex]);
         }
@@ -386,13 +392,16 @@ int wmain(const int argc, const wchar_t *const argv[])
 {
     HANDLE hThreads[MAX_THREADS], hMyFiles[MAX_THREADS - 1U];
     int exitCode = 1, argOff = 1;
+    BOOL myFlag = TRUE;
     DWORD fileCount = 0U, threadCount = 0U, myIndex = 0U;
     options_t options;
+    static thread_t threadData[MAX_THREADS];
 
     /* Initialize local variables */
     FILL_ARRAY(hMyFiles, INVALID_HANDLE_VALUE);
     FILL_ARRAY(hThreads, NULL);
-    SecureZeroMemory(&options, sizeof(options_t));
+    SecureZeroMemory(&options, sizeof(options));
+    SecureZeroMemory(&threadData, sizeof(threadData));
 
     /* Initialize standard streams */
     const HANDLE hStdIn = GetStdHandle(STD_INPUT_HANDLE), hStdOut = GetStdHandle(STD_OUTPUT_HANDLE), hStdErr = GetStdHandle(STD_ERROR_HANDLE);
@@ -400,7 +409,7 @@ int wmain(const int argc, const wchar_t *const argv[])
     {
         if (VALID_HANDLE(hStdErr))
         {
-            write_text(hStdErr, L"[tee] System error: Failed to initialize standard I/O handles!\n");
+            write_text(hStdErr, L"[tee] Operating system error: GetStdHandle() has failed!\n");
         }
         return -1;
     }
@@ -468,7 +477,7 @@ int wmain(const int argc, const wchar_t *const argv[])
     {
         if (GetLastError() != NO_ERROR)
         {
-            write_text(hStdErr, L"[tee] System error: Failed to initialize standard input stream!\n");
+            write_text(hStdErr, L"[tee] Operating system error: GetFileType(hStdIn) has failed!\n");
             return -1;
         }
     }
@@ -478,7 +487,7 @@ int wmain(const int argc, const wchar_t *const argv[])
     {
         if (GetLastError() != NO_ERROR)
         {
-            write_text(hStdErr, L"[tee] System error: Failed to initialize standard output stream!\n");
+            write_text(hStdErr, L"[tee] Operating system error: GetFileType(hStdOut) has failed!\n");
             return -1;
         }
     }
@@ -519,18 +528,15 @@ int wmain(const int argc, const wchar_t *const argv[])
     /* Start threads */
     for (DWORD threadId = 0; threadId < outputCount; ++threadId)
     {
-        g_threadData[threadId].hOutput = (threadId > 0U) ? hMyFiles[threadId - 1U] : hStdOut;
-        g_threadData[threadId].hError = hStdErr;
-        g_threadData[threadId].flush = options.flush && (!is_terminal(g_threadData[threadId].hOutput));
-        if (!(hThreads[threadCount++] = CreateThread(NULL, 0U, writer_thread_start_routine, (LPVOID)(DWORD_PTR)threadId, 0U, NULL)))
+        threadData[threadId].hOutput = (threadId > 0U) ? hMyFiles[threadId - 1U] : hStdOut;
+        threadData[threadId].hError = hStdErr;
+        threadData[threadId].flush = options.flush && (!is_terminal(threadData[threadId].hOutput));
+        if (!(hThreads[threadCount++] = CreateThread(NULL, 0U, writer_thread_start_routine, (LPVOID)&threadData[threadId], 0U, NULL)))
         {
-            write_text(hStdErr, L"[tee] System error: Failed to create thread!\n");
+            write_text(hStdErr, L"[tee] Operating system error: CreateThread() has failed!\n");
             goto cleanup;
         }
     }
-
-    /* Initialize the index */
-    BYTE myFlag = 1U;
 
     /* Process all input from STDIN stream */
     do
@@ -539,23 +545,23 @@ int wmain(const int argc, const wchar_t *const argv[])
 
         AcquireSRWLockExclusive(&g_rwLocks[myIndex]);
 
-        while (_InterlockedCompareExchange(&g_pending[myIndex], threadCount, 0L))
+        while (g_pending[myIndex])
         {
             if (!SleepConditionVariableSRW(&g_condAllDone[myIndex], &g_rwLocks[myIndex], INFINITE, 0U))
             {
                 ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
-                write_text(hStdErr, L"[tee] System error: Failed to sleep on the conditional variable!\n");
-                goto cleanup;
+                write_text(hStdErr, L"[tee] Operating system error: SleepConditionVariableSRW() has failed!\n");
+                TerminateProcess(GetCurrentProcess(), 1U);
             }
         }
 
-        if (!ReadFile(hStdIn, g_buffer[myIndex], BUFF_SIZE, &g_bytesTotal[myIndex], NULL))
+        if (!ReadFile(hStdIn, g_buffer[myIndex], BUFFER_SIZE, &g_bytesTotal[myIndex], NULL))
         {
             const DWORD error = GetLastError();
             ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
             if (error != ERROR_BROKEN_PIPE)
             {
-                write_text(hStdErr, L"[tee] Error: Failed to read input data!\n");
+                write_text(hStdErr, L"[tee] I/O error: Failed to read input data!\n");
                 goto cleanup;
             }
             break;
@@ -571,7 +577,7 @@ int wmain(const int argc, const wchar_t *const argv[])
             break;
         }
 
-        g_state[myIndex] = myFlag;
+        g_pending[myIndex] = myFlag ? POS_LONG(threadCount) : NEG_LONG(threadCount);
 
         ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
         WakeAllConditionVariable(&g_condIsReady[myIndex]);
@@ -591,8 +597,8 @@ cleanup:
 
     /* Stop the worker threads */
     AcquireSRWLockExclusive(&g_rwLocks[myIndex]);
-    g_state[myIndex] = MAXBYTE;
-    g_pending[myIndex] = MAX_THREADS;
+    g_bytesTotal[myIndex] = MAXDWORD;
+    g_pending[myIndex] = myFlag ? MAXLONG : MINLONG;
     ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
     WakeAllConditionVariable(&g_condIsReady[myIndex]);
 
@@ -607,7 +613,7 @@ cleanup:
             {
                 if (WaitForSingleObject(hThreads[threadId], 125U) != WAIT_OBJECT_0)
                 {
-                    write_text(hStdErr, L"[tee] Error: Worker thread did not exit cleanly!\n");
+                    write_text(hStdErr, L"[tee] Internal error: Worker thread did not exit cleanly!\n");
                     TerminateThread(hThreads[threadId], 1U);
                 }
             }
