@@ -595,8 +595,17 @@ int wmain(const int argc, const wchar_t *const argv[])
 
 cleanup:
 
-    /* Stop the worker threads */
+    /* Wait for the pending writes */
     AcquireSRWLockExclusive(&g_rwLocks[myIndex]);
+    while (g_pending[myIndex])
+    {
+        if (!SleepConditionVariableSRW(&g_condAllDone[myIndex], &g_rwLocks[myIndex], 30000U, 0U))
+        {
+            break; /*timeout*/
+        }
+    }
+
+    /* Shut down the remaining worker threads */
     g_bytesTotal[myIndex] = MAXDWORD;
     g_pending[myIndex] = myFlag ? MAXLONG : MINLONG;
     ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
