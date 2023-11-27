@@ -49,9 +49,6 @@
 // Utilities
 // --------------------------------------------------------------------------
 
-#define POS_LONG(X) ((LONG)((X) & MAXLONG))
-#define NEG_LONG(X) (-POS_LONG(X))
-
 static wchar_t to_lower(const wchar_t c)
 {
     return ((c >= L'A') && (c <= L'Z')) ? (L'a' + (c - L'A')) : c;
@@ -241,10 +238,35 @@ static BOOL write_text(const HANDLE handle, const wchar_t *const text)
 while (0)
 
 // --------------------------------------------------------------------------
+// Condition variables
+// --------------------------------------------------------------------------
+
+static __forceinline void sleep_condvar_srw(const HANDLE hStdErr, const PCONDITION_VARIABLE condvar, const PSRWLOCK lock, const DWORD timeout, const BOOL sharedMode)
+{
+    const ULONG flags = sharedMode ? CONDITION_VARIABLE_LOCKMODE_SHARED : 0U;
+    if (!SleepConditionVariableSRW(condvar, lock, timeout, flags))
+    {
+        if (GetLastError() != ERROR_TIMEOUT)
+        {
+            write_text(hStdErr, L"[tee] Operating system error: SleepConditionVariableSRW() has failed!\n");
+            TerminateProcess(GetCurrentProcess(), 1U);
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
 // Writer thread
 // --------------------------------------------------------------------------
 
-#define INCREMENT_INDEX(INDEX, FLAG) do { if (++(INDEX) >= BUFFERS) { (INDEX) = 0U; (FLAG) = (!(FLAG)); } } while (0)
+#define INCREMENT_INDEX(INDEX, FLAG) do \
+{ \
+    if (++(INDEX) >= BUFFERS) \
+    { \
+        (INDEX) = 0U; \
+        (FLAG) = (!(FLAG)); \
+    } \
+} \
+while (0)
 
 typedef struct _thread
 {
@@ -276,17 +298,12 @@ static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 
         while (!(myFlag ? (pending > 0L) : (pending < 0L)))
         {
-            if (!SleepConditionVariableSRW(&g_condIsReady[myIndex], &g_rwLocks[myIndex], INFINITE, CONDITION_VARIABLE_LOCKMODE_SHARED))
-            {
-                ReleaseSRWLockShared(&g_rwLocks[myIndex]);
-                write_text(param->hError, L"[tee] Operating system error: SleepConditionVariableSRW() has failed!\n");
-                TerminateProcess(GetCurrentProcess(), 1U);
-            }
+            sleep_condvar_srw(param->hError, &g_condIsReady[myIndex], &g_rwLocks[myIndex], INFINITE, TRUE);
             pending = g_pending[myIndex];
         }
 
         const DWORD bytesTotal = g_bytesTotal[myIndex];
-        if (bytesTotal == MAXDWORD)
+        if (bytesTotal > BUFFER_SIZE)
         {
             ReleaseSRWLockShared(&g_rwLocks[myIndex]);
             if (writeErrors)
@@ -547,12 +564,7 @@ int wmain(const int argc, const wchar_t *const argv[])
 
         while (g_pending[myIndex])
         {
-            if (!SleepConditionVariableSRW(&g_condAllDone[myIndex], &g_rwLocks[myIndex], INFINITE, 0U))
-            {
-                ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
-                write_text(hStdErr, L"[tee] Operating system error: SleepConditionVariableSRW() has failed!\n");
-                TerminateProcess(GetCurrentProcess(), 1U);
-            }
+            sleep_condvar_srw(hStdErr, &g_condAllDone[myIndex], &g_rwLocks[myIndex], INFINITE, FALSE);
         }
 
         if (!ReadFile(hStdIn, g_buffer[myIndex], BUFFER_SIZE, &g_bytesTotal[myIndex], NULL))
@@ -577,7 +589,7 @@ int wmain(const int argc, const wchar_t *const argv[])
             break;
         }
 
-        g_pending[myIndex] = myFlag ? POS_LONG(threadCount) : NEG_LONG(threadCount);
+        g_pending[myIndex] = myFlag ? ((LONG)threadCount) : (-((LONG)threadCount));
 
         ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
         WakeAllConditionVariable(&g_condIsReady[myIndex]);
@@ -599,10 +611,7 @@ cleanup:
     AcquireSRWLockExclusive(&g_rwLocks[myIndex]);
     while (g_pending[myIndex])
     {
-        if (!SleepConditionVariableSRW(&g_condAllDone[myIndex], &g_rwLocks[myIndex], 30000U, 0U))
-        {
-            break; /*timeout*/
-        }
+        sleep_condvar_srw(hStdErr, &g_condAllDone[myIndex], &g_rwLocks[myIndex], 25000U, FALSE);
     }
 
     /* Shut down the remaining worker threads */
