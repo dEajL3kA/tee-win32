@@ -286,26 +286,27 @@ static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
     DWORD bytesWritten = 0U, myIndex = 0U;
     LONG pending = 0L;
     BOOL myFlag = TRUE, writeErrors = FALSE;
+    PSRWLOCK rwLock = NULL;
     const thread_t *const param = (const thread_t*)lpThreadParameter;
 
     for (;;)
     {
         ASSERT(myIndex < BUFFERS, param->hError, L"Current buffer index is out of range!");
 
-        AcquireSRWLockShared(&g_rwLocks[myIndex]);
+        AcquireSRWLockShared(rwLock = &g_rwLocks[myIndex]);
 
         pending = g_pending[myIndex];
 
         while (!(myFlag ? (pending > 0L) : (pending < 0L)))
         {
-            sleep_condvar_srw(param->hError, &g_condIsReady[myIndex], &g_rwLocks[myIndex], INFINITE, TRUE);
+            sleep_condvar_srw(param->hError, &g_condIsReady[myIndex], rwLock, INFINITE, TRUE);
             pending = g_pending[myIndex];
         }
 
         const DWORD bytesTotal = g_bytesTotal[myIndex];
         if (bytesTotal > BUFFER_SIZE)
         {
-            ReleaseSRWLockShared(&g_rwLocks[myIndex]);
+            ReleaseSRWLockShared(rwLock);
             if (writeErrors)
             {
                 write_text(param->hError, L"[tee] I/O error: Not all data could be written!\n");
@@ -327,7 +328,7 @@ static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 
         pending = myFlag ? _InterlockedDecrement(&g_pending[myIndex]) : _InterlockedIncrement(&g_pending[myIndex]);
 
-        ReleaseSRWLockShared(&g_rwLocks[myIndex]);
+        ReleaseSRWLockShared(rwLock);
 
         if (!pending)
         {
@@ -349,7 +350,7 @@ static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 
 typedef struct
 {
-    BOOL append, delay, flush, help, ignore, version;
+    BOOL append, buffer, delay, flush, help, ignore, version;
 }
 options_t;
 
@@ -368,6 +369,7 @@ static BOOL parse_option(options_t *const options, const wchar_t c, const wchar_
     const wchar_t lc = to_lower(c);
 
     PARSE_OPTION('a', append);
+    PARSE_OPTION('b', buffer);
     PARSE_OPTION('d', delay);
     PARSE_OPTION('f', flush);
     PARSE_OPTION('h', help);
@@ -402,6 +404,33 @@ static BOOL parse_argument(options_t *const options, const wchar_t *const argume
 }
 
 // --------------------------------------------------------------------------
+// Help screen
+// --------------------------------------------------------------------------
+
+static void print_helpscreen(const HANDLE hStdErr, const BOOL full)
+{
+    wchar_t* const versionString = format_string(L"tee for Windows v%1!u!.%2!u!.%3!u! [%4!s!] [%5!s!]\n", APP_VERSION_MAJOR, APP_VERSION_MINOR, APP_VERSION_PATCH, PROCESSOR_ARCHITECTURE, TEXT(__DATE__));
+    write_text(hStdErr, versionString ? versionString : L"tee for Windows\n");
+    if (full)
+    {
+        write_text(hStdErr, L"\n"
+            L"Copy standard input to output file(s), and also to standard output.\n\n"
+            L"Usage:\n"
+            L"  gizmo.exe [...] | tee.exe [options] <file_1> ... <file_n>\n\n"
+            L"Options:\n"
+            L"  -a --append  Append to the existing file, instead of truncating\n"
+            L"  -b --buffer  Enable write combining, i.e. buffer small chunks\n"
+            L"  -f --flush   Flush output file after each write operation\n"
+            L"  -i --ignore  Ignore the interrupt signal (SIGINT), e.g. CTRL+C\n"
+            L"  -d --delay   Add a small delay after each read operation\n\n");
+    }
+    if (versionString)
+    {
+        LocalFree(versionString);
+    }
+}
+
+// --------------------------------------------------------------------------
 // MAIN
 // --------------------------------------------------------------------------
 
@@ -409,8 +438,9 @@ int wmain(const int argc, const wchar_t *const argv[])
 {
     HANDLE hThreads[MAX_THREADS], hMyFiles[MAX_THREADS - 1U];
     int exitCode = 1, argOff = 1;
-    BOOL myFlag = TRUE;
-    DWORD fileCount = 0U, threadCount = 0U, myIndex = 0U;
+    BOOL myFlag = TRUE, readErrors = FALSE;
+    DWORD fileCount = 0U, threadCount = 0U, myIndex = 0U, bytesRead = 0U, totalBytes = 0U;
+    PSRWLOCK rwLock = NULL;
     options_t options;
     static thread_t threadData[MAX_THREADS];
 
@@ -460,24 +490,7 @@ int wmain(const int argc, const wchar_t *const argv[])
     /* Print manual page */
     if (options.help || options.version)
     {
-        wchar_t *const versionString = format_string(L"tee for Windows v%1!u!.%2!u!.%3!u! [%4!s!] [%5!s!]\n", APP_VERSION_MAJOR, APP_VERSION_MINOR, APP_VERSION_PATCH, PROCESSOR_ARCHITECTURE, TEXT(__DATE__));
-        write_text(hStdErr, versionString ? versionString : L"tee for Windows\n");
-        if (options.help)
-        {
-            write_text(hStdErr, L"\n"
-                L"Copy standard input to output file(s), and also to standard output.\n\n"
-                L"Usage:\n"
-                L"  gizmo.exe [...] | tee.exe [options] <file_1> ... <file_n>\n\n"
-                L"Options:\n"
-                L"  -a --append  Append to the existing file, instead of truncating\n"
-                L"  -f --flush   Flush output file after each write operation\n"
-                L"  -i --ignore  Ignore the interrupt signal (SIGINT), e.g. CTRL+C\n"
-                L"  -d --delay   Add a small delay after each read operation\n\n");
-        }
-        if (versionString)
-        {
-            LocalFree(versionString);
-        }
+        print_helpscreen(hStdErr, options.help);
         return 0;
     }
 
@@ -519,7 +532,7 @@ int wmain(const int argc, const wchar_t *const argv[])
             if ((hMyFiles[fileCount++] = hFile) == INVALID_HANDLE_VALUE)
             {
                 WRITE_TEXT(L"[tee] Error: Failed to open the output file \"", fileName, L"\" for writing!\n");
-                goto cleanup;
+                goto cleanUp;
             }
             else if (options.append)
             {
@@ -527,7 +540,7 @@ int wmain(const int argc, const wchar_t *const argv[])
                 if (!SetFilePointerEx(hFile, offset, NULL, FILE_END))
                 {
                     write_text(hStdErr, L"[tee] Error: Failed to move the file pointer to the end of the file!\n");
-                    goto cleanup;
+                    goto cleanUp;
                 }
             }
         }
@@ -551,50 +564,61 @@ int wmain(const int argc, const wchar_t *const argv[])
         if (!(hThreads[threadCount++] = CreateThread(NULL, 0U, writer_thread_start_routine, (LPVOID)&threadData[threadId], 0U, NULL)))
         {
             write_text(hStdErr, L"[tee] Operating system error: CreateThread() has failed!\n");
-            goto cleanup;
+            goto cleanUp;
         }
     }
+
+    /* Determine minumum chunk size */
+    const DWORD minimumLength = options.buffer ? (BUFFER_SIZE / 8U) : 1U;
 
     /* Process all input from STDIN stream */
     do
     {
         ASSERT(myIndex < BUFFERS, hStdErr, L"Current buffer index is out of range!");
 
-        AcquireSRWLockExclusive(&g_rwLocks[myIndex]);
+        AcquireSRWLockExclusive(rwLock = &g_rwLocks[myIndex]);
 
         while (g_pending[myIndex])
         {
-            sleep_condvar_srw(hStdErr, &g_condAllDone[myIndex], &g_rwLocks[myIndex], INFINITE, FALSE);
+            sleep_condvar_srw(hStdErr, &g_condAllDone[myIndex], rwLock, INFINITE, FALSE);
         }
 
-        if (!ReadFile(hStdIn, g_buffer[myIndex], BUFFER_SIZE, &g_bytesTotal[myIndex], NULL))
+        BYTE *const ptrBuffer = g_buffer[myIndex];
+
+        for (totalBytes = 0U; totalBytes < minimumLength; totalBytes += bytesRead)
         {
-            const DWORD error = GetLastError();
-            ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
-            if (error != ERROR_BROKEN_PIPE)
+            if (!ReadFile(hStdIn, &ptrBuffer[totalBytes], BUFFER_SIZE - totalBytes, &bytesRead, NULL))
             {
-                write_text(hStdErr, L"[tee] I/O error: Failed to read input data!\n");
-                goto cleanup;
+                if (GetLastError() != ERROR_BROKEN_PIPE)
+                {
+                    readErrors = TRUE;
+                }
+                break;
             }
+            if ((!bytesRead) && (inputType != FILE_TYPE_PIPE))
+            {
+                break; /*pipes may return zero bytes, even when more data can become available later!*/
+            }
+        }
+
+        if (!totalBytes)
+        {
+            ReleaseSRWLockExclusive(rwLock);
             break;
         }
 
-        if (!g_bytesTotal[myIndex])
-        {
-            ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
-            if (inputType == FILE_TYPE_PIPE)
-            {
-                continue; /*pipes may return zero bytes, even when more data can become available later!*/
-            }
-            break;
-        }
-
+        g_bytesTotal[myIndex] = totalBytes;
         g_pending[myIndex] = myFlag ? ((LONG)threadCount) : (-((LONG)threadCount));
 
         ReleaseSRWLockExclusive(&g_rwLocks[myIndex]);
         WakeAllConditionVariable(&g_condIsReady[myIndex]);
 
         INCREMENT_INDEX(myIndex, myFlag);
+
+        if (readErrors)
+        {
+            break; /*abort on previous read errors*/
+        }
 
         if (options.delay)
         {
@@ -603,9 +627,16 @@ int wmain(const int argc, const wchar_t *const argv[])
     }
     while ((!g_stop) || options.ignore);
 
+    /* Check for read errors */
+    if (readErrors)
+    {
+        write_text(hStdErr, L"[tee] I/O error: Failed to read input data!\n");
+        goto cleanUp;
+    }
+
     exitCode = 0;
 
-cleanup:
+cleanUp:
 
     /* Wait for the pending writes */
     AcquireSRWLockExclusive(&g_rwLocks[myIndex]);

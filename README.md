@@ -17,6 +17,7 @@ Usage:
 
 Options:
   -a --append  Append to the existing file, instead of truncating
+  -b --buffer  Enable write combining, i.e. buffer small chunks
   -f --flush   Flush output file after each write operation
   -i --ignore  Ignore the interrupt signal (SIGINT), e.g. CTRL+C
   -d --delay   Add a small delay after each read operation
