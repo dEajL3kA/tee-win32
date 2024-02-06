@@ -34,7 +34,7 @@ gizmo.exe [...] | tee.exe NUL
 
 This is a "native" implementation of the **`tee`** command that builds directly on top of the Win32 API.
 
-It uses multi-threaded I/O and triple buffering for maximum throughput.
+It uses [multi-threaded I/O and triple buffering](https://github.com/dEajL3kA/tee-win32/wiki/Multi%E2%80%90Threading) for maximum throughput.
 
 ## System Requirements
 
