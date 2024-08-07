@@ -350,7 +350,7 @@ static DWORD WINAPI writer_thread_start_routine(const LPVOID lpThreadParameter)
 
 typedef struct
 {
-    BOOL append, buffer, delay, flush, help, ignore, version;
+    BOOL append, buffer, delay, escape, flush, help, ignore, version;
 }
 options_t;
 
@@ -371,6 +371,7 @@ static BOOL parse_option(options_t *const options, const wchar_t c, const wchar_
     PARSE_OPTION('a', append);
     PARSE_OPTION('b', buffer);
     PARSE_OPTION('d', delay);
+    PARSE_OPTION('e', escape);
     PARSE_OPTION('f', flush);
     PARSE_OPTION('h', help);
     PARSE_OPTION('i', ignore);
@@ -420,6 +421,7 @@ static void print_helpscreen(const HANDLE hStdErr, const BOOL full)
             L"Options:\n"
             L"  -a --append  Append to the existing file, instead of truncating\n"
             L"  -b --buffer  Enable write combining, i.e. buffer small chunks\n"
+            L"  -e --escape  Enable standard output ANSI escape code processing\n"
             L"  -f --flush   Flush output file after each write operation\n"
             L"  -i --ignore  Ignore the interrupt signal (SIGINT), e.g. CTRL+C\n"
             L"  -d --delay   Add a small delay after each read operation\n\n");
@@ -512,13 +514,13 @@ int wmain(const int argc, const wchar_t *const argv[])
         }
     }
 
-    /* Validate output stream */
-    if (GetFileType(hStdOut) == FILE_TYPE_UNKNOWN)
+    /* Enable ANSI escape code processing of stdout */
+    if (options.escape)
     {
-        if (GetLastError() != NO_ERROR)
+        DWORD stdOutMode = 0U;
+        if (GetConsoleMode(hStdOut, &stdOutMode))
         {
-            write_text(hStdErr, L"[tee] Operating system error: GetFileType(hStdOut) has failed!\n");
-            return -1;
+            SetConsoleMode(hStdOut, stdOutMode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
         }
     }
 
