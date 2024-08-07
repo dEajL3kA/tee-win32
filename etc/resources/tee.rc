@@ -57,7 +57,7 @@ BEGIN
             VALUE "FileVersion",      MY_VERSION_STRING
             VALUE "InternalName",     "tee-win32"
             VALUE "OriginalFilename", "tee.exe"
-            VALUE "LegalCopyright",   "Copyright (c) 2023 dEajL3kA <Cumpoing79@web.de>"
+            VALUE "LegalCopyright",   "Copyright (c) 2024 dEajL3kA <Cumpoing79@web.de>"
             VALUE "CompanyName",      "dEajL3kA"
             VALUE "LegalTrademarks",  "dEajL3kA"
             VALUE "Comments",         "Released under the MIT license"

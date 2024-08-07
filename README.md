@@ -51,7 +51,7 @@ Git mirrors for this project:
 
 ## License
 
-Copyright (c) 2023 “dEajL3kA” &lt;Cumpoing79@web.de&gt;  
+Copyright (c) 2024 “dEajL3kA” &lt;Cumpoing79@web.de&gt;  
 This work has been released under the MIT license. See [LICENSE.txt](LICENSE.txt) for details!
 
 ### Acknowledgement
